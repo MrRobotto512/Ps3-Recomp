@@ -61,6 +61,19 @@ The first run creates a `.venv` and installs the dependencies.
 4. **Settings:** compiler (clang-cl or MSVC), Release/RelWithDebInfo/Debug,
    theme.
 
+### Logs
+
+Every run saves each step's output to its own file, with the command, start
+time, duration and exit code: `logs/<date-time>-<port name>/01-load.log`,
+`02-lift.log`, `03-configure.log` and so on (launches and RPCS3 snapshots get
+their own folders too). These are complete, unlike the on-screen log, which
+keeps only the last 20,000 lines.
+
+- The **save** button at the end of each step row exports that step's log.
+- **Export logs** on the Output card saves the whole run as one `.zip`, which
+  you can attach to a bug report. **Logs folder** opens `logs/`.
+- On the RPCS3 page, **Export log** saves the last snapshot's output.
+
 The RPCS3 page can also boot the original game for comparison and take a
 **memory snapshot** (registers, call stack, memory → JSON) through
 `ps3recomp/tools/rpcs3_probe`. That requires an RPCS3 build with its GDB server
@@ -84,6 +97,9 @@ The same pipeline without the GUI:
 python scripts\recomp.py path\to\PS3_GAME\USRDIR\EBOOT.elf --build --name MyGame
 build\Release\MyGame.exe path\to\PS3_GAME\USRDIR\EBOOT.elf
 ```
+
+The CLI writes the same per-step logs and prints where they are. Add
+`--zip-logs run.zip` to pack them into one file as well.
 
 ## Repository layout
 

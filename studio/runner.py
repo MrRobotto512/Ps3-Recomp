@@ -1,12 +1,16 @@
-"""Run a list of pipeline Steps one after another with QProcess, streaming output."""
+"""Run a list of pipeline Steps one after another with QProcess, streaming output.
+
+With a log folder, each step's output is also saved to its own file there.
+"""
 
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, Signal
 
-from .pipeline import Step
+from .pipeline import Step, StepLog, quote_argv, step_log_name
 
 
 class StepRunner(QObject):
@@ -23,21 +27,28 @@ class StepRunner(QObject):
         self._index = -1
         self._started = 0.0
         self._cancelled = False
+        self._code: int | None = None
+        self._log: StepLog | None = None
+        self.log_dir: Path | None = None
+        self.log_paths: list[Path | None] = []   # per step, once it has started
 
     @property
     def running(self) -> bool:
         return self._proc is not None
 
-    def run(self, steps: list[Step], env: dict[str, str] | None = None) -> None:
+    def run(self, steps: list[Step], env: dict[str, str] | None = None,
+            log_dir: Path | None = None) -> None:
         if self.running:
             return
+        self.log_dir = log_dir
+        self.log_paths = [None] * len(steps)
         self._steps, self._env, self._index, self._cancelled = list(steps), dict(env or {}), -1, False
         self._next()
 
     def cancel(self) -> None:
         if self._proc is not None:
             self._cancelled = True
-            self.output.emit("\n[studio] cancelling...\n")
+            self._emit("\n[studio] cancelling...\n")
             self._proc.kill()
 
     def _next(self) -> None:
@@ -61,26 +72,33 @@ class StepRunner(QObject):
         proc.finished.connect(self._done)
         proc.errorOccurred.connect(self._error)
         self._proc = proc
-        self._started = time.monotonic()
+        self._started, self._code = time.monotonic(), None
+        if self.log_dir is not None:
+            try:
+                self._log = StepLog(self.log_dir / step_log_name(self._index, step), step)
+                self.log_paths[self._index] = self._log.path
+            except OSError as e:
+                self.output.emit(f"[studio] could not write the log: {e}\n")
         self.stepStarted.emit(self._index)
-        self.output.emit(f"\n> {step.title}\n$ {' '.join(_quote(a) for a in step.argv)}\n")
+        self.output.emit(f"\n> {step.title}\n$ {quote_argv(step.argv)}\n")
         proc.start(step.argv[0], step.argv[1:])
 
     def _read(self) -> None:
         if self._proc is not None:
             data = bytes(self._proc.readAllStandardOutput())
-            self.output.emit(data.decode("utf-8", "replace"))
+            self._emit(data.decode("utf-8", "replace"))
 
     def _error(self, err) -> None:
         if err == QProcess.ProcessError.FailedToStart and self._proc is not None:
-            self.output.emit(f"[studio] could not start {self._steps[self._index].argv[0]!r}: "
-                             f"{self._proc.errorString()}\n")
+            self._emit(f"[studio] could not start {self._steps[self._index].argv[0]!r}: "
+                       f"{self._proc.errorString()}\n")
             self._finish_step(False)
 
     def _done(self, code: int, status) -> None:
+        self._code = code
         ok = status == QProcess.ExitStatus.NormalExit and code == 0 and not self._cancelled
         if not ok and not self._cancelled:
-            self.output.emit(f"[studio] {self._steps[self._index].title} failed (exit code {code})\n")
+            self._emit(f"[studio] {self._steps[self._index].title} failed (exit code {code})\n")
         self._finish_step(ok)
 
     def _finish_step(self, ok: bool) -> None:
@@ -88,6 +106,9 @@ class StepRunner(QObject):
             return
         self._read()
         proc, self._proc = self._proc, None
+        if self._log is not None:
+            self._log.close(ok, self._code)
+            self._log = None
         proc.deleteLater()
         self.stepFinished.emit(self._index, ok, time.monotonic() - self._started)
         if ok:
@@ -96,6 +117,7 @@ class StepRunner(QObject):
         else:
             self.finished.emit(False)
 
-
-def _quote(arg: str) -> str:
-    return f'"{arg}"' if " " in arg else arg
+    def _emit(self, text: str) -> None:
+        if self._log is not None:
+            self._log.write(text)
+        self.output.emit(text)
