@@ -1,0 +1,5 @@
+# PS3 Recomp Studio (the GUI) plus the ps3recomp pipeline tools it runs.
+#   pip install -r requirements-studio.txt
+-r ps3recomp/requirements.txt
+PySide6>=6.7
+PySide6-Fluent-Widgets>=1.7

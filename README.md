@@ -1,0 +1,105 @@
+# Ps3-Recomp
+
+Recompile PlayStation 3 games into native Windows programs.
+
+This repository is a **port workspace** built on
+[ps3recomp](https://github.com/sp00nznet/ps3recomp), the open-source PS3 static
+recompilation toolkit (included as a git submodule). It adds **PS3 Recomp
+Studio**, a Windows 11–style app that runs the entire pipeline for you:
+decrypt → lift → build → launch.
+
+> You must supply your own legally obtained game files. Nothing from a game,
+> and no Sony keys or firmware, is in this repository. The `.gitignore` keeps
+> EBOOTs, ELFs and the generated code out of git.
+
+## How it works
+
+A PS3 game's code is PowerPC (the Cell's PPU) plus small SPU programs. Instead
+of emulating them like RPCS3, ps3recomp **translates them ahead of time**:
+
+| Step | Tool | Result |
+|------|------|--------|
+| Decrypt | RPCS3 (*Utilities › Decrypt PS3 Binaries*) | `EBOOT.elf` |
+| Load | `ps3recomp/tools/ppu_loader.py` | function list, firmware imports, TOC |
+| Lift | `ps3recomp/tools/ppu_lifter.py` | `recompiled/` — the game as C++ |
+| Build | CMake + Visual Studio | `build/Release/<Game>.exe`, linked with the ps3recomp runtime (LV2 kernel, ~90 system libraries, RSX → Direct3D 12) |
+
+Getting a lift to *compile* is the easy part. Getting a game to *run* usually
+means fixing whatever the runtime does not handle yet for that title: a missing
+HLE function, an SPU job, a graphics feature. Read ps3recomp's
+[Game Porting Guide](ps3recomp/docs/GAME_PORTING_GUIDE.md); two games are
+currently in-game with it (see its README).
+
+## Setup (Windows)
+
+Install:
+
+1. [Git](https://git-scm.com/download/win) and [Python 3.10+](https://www.python.org/downloads/) (tick *Add to PATH*).
+2. [Visual Studio 2022](https://visualstudio.microsoft.com/) (Community is fine) with
+   **Desktop development with C++** and the **C++ Clang tools for Windows** component.
+   CMake comes with it; a standalone [CMake 3.20+](https://cmake.org/download/) also works.
+3. [RPCS3](https://rpcs3.net/) and the PS3 firmware, for decrypting your games.
+
+Then:
+
+```bat
+git clone --recursive https://github.com/MrRobotto512/Ps3-Recomp.git
+cd Ps3-Recomp
+PS3RecompStudio.bat
+```
+
+The first run creates a `.venv` and installs the dependencies.
+
+## Using PS3 Recomp Studio
+
+1. **RPCS3 page:** set `rpcs3.exe`, decrypt your `EBOOT.BIN` there, then click
+   *Use decrypted EBOOT.elf…*.
+2. **Game page:** the title and ID are read from `PARAM.SFO`. Check the game
+   folder (the one containing `PS3_GAME/`) and the port name.
+3. **Recompile page:** *Recompile & build*, then *Launch*. All tool output
+   streams into the log.
+4. **Settings:** compiler (clang-cl or MSVC), Release/RelWithDebInfo/Debug,
+   theme.
+
+The RPCS3 page can also boot the original game for comparison and take a
+**memory snapshot** (registers, call stack, memory → JSON) through
+`ps3recomp/tools/rpcs3_probe`. That requires an RPCS3 build with its GDB server
+enabled, which is a compile-time option.
+
+### Packaging the app as an .exe
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package_windows.ps1
+```
+
+This produces `dist\PS3 Recomp Studio\PS3 Recomp Studio.exe`. Keep it inside
+this repository: it finds the toolkit by searching upward, and it still uses
+Python, CMake and Visual Studio from the PC.
+
+## Command line
+
+The same pipeline without the GUI:
+
+```bat
+python scripts\recomp.py path\to\PS3_GAME\USRDIR\EBOOT.elf --build --name MyGame
+build\Release\MyGame.exe path\to\PS3_GAME\USRDIR\EBOOT.elf
+```
+
+## Repository layout
+
+| Path | What |
+|------|------|
+| `ps3recomp/` | the toolkit (submodule, pinned) |
+| `studio/` | PS3 Recomp Studio. `pipeline.py` holds the commands and has no Qt; `ui/` is the interface. |
+| `scripts/recomp.py` | CLI for the same pipeline |
+| `CMakeLists.txt`, `main.cpp`, `stubs.cpp`, `config.toml` | the port project, from ps3recomp's `templates/project`. Per-game fixes go in `stubs.cpp`. |
+| `tests/` | `python -m pytest tests` |
+
+Update the toolkit with `git submodule update --remote ps3recomp`.
+
+## Licences
+
+ps3recomp is MIT. The app's UI uses
+[PySide6-Fluent-Widgets](https://github.com/zhiyiYo/PyQt-Fluent-Widgets), which
+is GPLv3 for non-commercial use. If you distribute the packaged app, GPLv3
+applies to it.

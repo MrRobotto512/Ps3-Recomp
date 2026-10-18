@@ -1,0 +1,21 @@
+# Your game files never belong in git.
+game/
+*.elf
+*.ELF
+*.BIN
+*.SFO
+*.rap
+
+# Pipeline output (regenerate with the app or scripts/recomp.py)
+out/
+recompiled/
+build/
+build-*/
+
+# Python / packaging
+.venv/
+__pycache__/
+*.pyc
+dist/
+pyinstaller/
+*.spec

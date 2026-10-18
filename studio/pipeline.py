@@ -1,0 +1,209 @@
+"""The recompile pipeline as plain data: which commands to run, in what order.
+
+Nothing here imports Qt, so the CLI (scripts/recomp.py), the GUI and the tests
+all build exactly the same command lines.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+
+def _find_root() -> Path:
+    """The repository: holds CMakeLists.txt and the ps3recomp submodule.
+
+    A PyInstaller build lives in dist/ inside the repository, so search upward
+    from the executable instead of trusting the bundled package location.
+    """
+    if getattr(sys, "frozen", False):
+        for d in Path(sys.executable).resolve().parents:
+            if (d / "CMakeLists.txt").is_file() and (d / "ps3recomp").is_dir():
+                return d
+    return Path(__file__).resolve().parent.parent
+
+
+ROOT = _find_root()
+
+# Generators offered in Settings. On Windows the Visual Studio generator finds
+# the compiler itself, so no "x64 Native Tools" prompt is needed; ClangCL is
+# what the ps3recomp ports are built with.
+GENERATORS = {
+    "vs2022-clangcl": ("Visual Studio 2022 (clang-cl)",
+                       ["-G", "Visual Studio 17 2022", "-A", "x64", "-T", "ClangCL"]),
+    "vs2022-msvc": ("Visual Studio 2022 (MSVC)",
+                    ["-G", "Visual Studio 17 2022", "-A", "x64"]),
+    "ninja": ("Ninja (compiler from PATH)", ["-G", "Ninja"]),
+}
+DEFAULT_GENERATOR = "vs2022-clangcl" if os.name == "nt" else "ninja"
+
+# Format names shown in the UI.
+FMT_ELF, FMT_SELF, FMT_UNKNOWN = "ELF", "SELF", "unknown"
+
+
+def default_python() -> str:
+    """The interpreter that runs the ps3recomp tools.
+
+    Inside a PyInstaller build sys.executable is the app itself, so fall back
+    to whatever Python is on PATH.
+    """
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    return shutil.which("py") or shutil.which("python") or shutil.which("python3") or "python"
+
+
+@dataclass
+class Settings:
+    toolkit_dir: str = str(ROOT / "ps3recomp")
+    work_dir: str = str(ROOT)          # out/, recompiled/ and build/ live here
+    python: str = field(default_factory=default_python)
+    cmake: str = "cmake"
+    generator: str = DEFAULT_GENERATOR
+    build_type: str = "Release"
+    chunks: int = 64
+    rpcs3: str = ""                    # path to rpcs3.exe
+    theme: str = "auto"                # auto | light | dark
+
+    @property
+    def tools(self) -> Path:
+        return Path(self.toolkit_dir) / "tools"
+
+    @property
+    def out_dir(self) -> Path:
+        return Path(self.work_dir) / "out"
+
+    @property
+    def recompiled_dir(self) -> Path:
+        return Path(self.work_dir) / "recompiled"
+
+    @property
+    def build_dir(self) -> Path:
+        return Path(self.work_dir) / "build"
+
+    @property
+    def multi_config(self) -> bool:
+        return self.generator.startswith("vs")
+
+
+@dataclass
+class Project:
+    eboot: str = ""          # EBOOT.BIN or a decrypted EBOOT.elf
+    game_root: str = ""      # folder holding PS3_GAME/ (the guest's disc root)
+    port_name: str = "PS3Port"
+
+
+@dataclass
+class Step:
+    key: str
+    title: str
+    description: str
+    argv: list[str]
+    cwd: str | None = None
+
+
+def detect_format(path: str | os.PathLike) -> str:
+    try:
+        with open(path, "rb") as f:
+            m = f.read(4)
+    except OSError:
+        return FMT_UNKNOWN
+    if m == b"\x7fELF":
+        return FMT_ELF
+    if m == b"SCE\0":
+        return FMT_SELF
+    return FMT_UNKNOWN
+
+
+def guess_game_root(eboot: str | os.PathLike) -> str:
+    """<root>/PS3_GAME/USRDIR/EBOOT.BIN -> <root>; otherwise the EBOOT's folder."""
+    p = Path(eboot).resolve()
+    for parent in p.parents:
+        if parent.name.upper() == "PS3_GAME":
+            return str(parent.parent)
+    return str(p.parent)
+
+
+def find_param_sfo(eboot: str | os.PathLike) -> Path | None:
+    p = Path(eboot).resolve()
+    for d in (p.parent, *p.parents[:3]):
+        for cand in (d / "PARAM.SFO", d / "PS3_GAME" / "PARAM.SFO"):
+            if cand.is_file():
+                return cand
+    return None
+
+
+def sanitize_name(text: str) -> str:
+    """A CMake target / file name from a game title."""
+    name = re.sub(r"[^A-Za-z0-9]+", "", text.title())
+    if not name or not name[0].isalpha():
+        name = "Port" + name
+    return name[:40]
+
+
+def elf_for(project: Project, s: Settings) -> Path:
+    """The ELF the loader and lifter read: the input itself, or the unwrapped SELF."""
+    src = Path(project.eboot)
+    if detect_format(src) == FMT_SELF:
+        return s.out_dir / (src.stem + ".elf")
+    return src
+
+
+def recompile_steps(project: Project, s: Settings) -> list[Step]:
+    py, tools = s.python, s.tools
+    src = Path(project.eboot)
+    elf = elf_for(project, s)
+    steps = []
+    if detect_format(src) == FMT_SELF:
+        steps.append(Step(
+            "unwrap", "Unwrap SELF",
+            "Rebuild the ELF from a debug fSELF. Retail EBOOTs need RPCS3 instead.",
+            [py, str(tools / "unfself.py"), str(src), "--output", str(elf)]))
+    steps.append(Step(
+        "load", "Load ELF",
+        "Find functions (OPD table), the TOC and firmware imports.",
+        [py, str(tools / "ppu_loader.py"), str(elf), "--output", str(s.out_dir)]))
+    steps.append(Step(
+        "lift", "Lift PPU code",
+        "Translate every PowerPC function into C++.",
+        [py, str(tools / "ppu_lifter.py"), str(elf),
+         "--functions", str(s.out_dir / f"{elf.stem}.functions.json"),
+         "--hle-stubs", str(s.out_dir / f"{elf.stem}.imports.json"),
+         "--chunks", str(s.chunks),
+         "--output", str(s.recompiled_dir)]))
+    return steps
+
+
+def build_steps(project: Project, s: Settings) -> list[Step]:
+    configure = [s.cmake, "-S", str(ROOT), "-B", str(s.build_dir),
+                 *GENERATORS[s.generator][1],
+                 f"-DPS3RECOMP_DIR={s.toolkit_dir}",
+                 f"-DRECOMP_DIR={s.recompiled_dir}",
+                 f"-DPORT_NAME={project.port_name}"]
+    if not s.multi_config:
+        configure.append(f"-DCMAKE_BUILD_TYPE={s.build_type}")
+    build = [s.cmake, "--build", str(s.build_dir), "--parallel"]
+    if s.multi_config:
+        build += ["--config", s.build_type]
+    return [
+        Step("configure", "Configure", "Generate the build with CMake.", configure),
+        Step("build", "Build", "Compile the lifted code and the ps3recomp runtime.", build),
+    ]
+
+
+def executable_path(project: Project, s: Settings) -> Path:
+    exe = project.port_name + (".exe" if os.name == "nt" else "")
+    if s.multi_config:
+        return s.build_dir / s.build_type / exe
+    return s.build_dir / exe
+
+
+def launch_argv(project: Project, s: Settings) -> tuple[list[str], dict[str, str]]:
+    """Command and extra environment that start the built port."""
+    argv = [str(executable_path(project, s)), str(elf_for(project, s))]
+    env = {"PS3_VFS_ROOT": project.game_root} if project.game_root else {}
+    return argv, env
