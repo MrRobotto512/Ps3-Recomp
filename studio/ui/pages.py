@@ -15,7 +15,7 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, FluentIcon, IconW
 
 from .. import config, rpcs3
 from ..pipeline import (FMT_ELF, FMT_SELF, GENERATORS, Project, Settings, build_steps,
-                        detect_format, executable_path, find_param_sfo, guess_game_root,
+                        detect_format, executable_path, find_cmake, find_param_sfo, guess_game_root,
                         launch_argv, recompile_steps, sanitize_name, Step)
 from ..runner import StepRunner
 from ..sfo import read_sfo
@@ -316,6 +316,12 @@ class RecompilePage(Page):
 
     def _start(self, indices) -> None:
         if self.runner.running or not self._check_ready():
+            return
+        n_lift = len(recompile_steps(self.state.project, self.state.settings))
+        if max(indices, default=-1) >= n_lift and not find_cmake(self.state.settings.cmake):
+            toast(self, "err", "CMake not found",
+                  "Install Visual Studio 2022 with “Desktop development with C++” (it includes "
+                  "CMake), or install CMake from cmake.org, or set its path in Settings.")
             return
         self.rebuild_rows()
         steps = self._all_steps()

@@ -93,3 +93,27 @@ def test_launch_sets_vfs_root(tmp_path):
     argv, env = p.launch_argv(project, p.Settings(work_dir=str(tmp_path), generator="ninja"))
     assert argv[1] == str(tmp_path / "EBOOT.elf")
     assert env == {"PS3_VFS_ROOT": str(tmp_path)}
+
+
+def test_find_cmake_inside_visual_studio(tmp_path, monkeypatch):
+    vs_cmake = (tmp_path / "PF" / "Microsoft Visual Studio" / "2022" / "Community" / "Common7"
+                / "IDE" / "CommonExtensions" / "Microsoft" / "CMake" / "CMake" / "bin" / "cmake.exe")
+    vs_cmake.parent.mkdir(parents=True)
+    vs_cmake.write_text("")
+    monkeypatch.setattr(p, "_IS_WINDOWS", True)
+    monkeypatch.setattr(p.shutil, "which", lambda *_: None)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "PF"))
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "PF86"))
+    assert p.find_cmake("cmake") == str(vs_cmake)
+    # An explicit path in Settings wins, and the build steps use what was found.
+    assert p.find_cmake(str(vs_cmake)) == str(vs_cmake)
+    steps = p.build_steps(p.Project(eboot="x"), p.Settings(work_dir=str(tmp_path)))
+    assert steps[0].argv[0] == str(vs_cmake) and steps[1].argv[0] == str(vs_cmake)
+
+
+def test_find_cmake_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(p, "_IS_WINDOWS", True)
+    monkeypatch.setattr(p.shutil, "which", lambda *_: None)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "none"))
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "none86"))
+    assert p.find_cmake("cmake") is None

@@ -42,6 +42,8 @@ GENERATORS = {
 }
 DEFAULT_GENERATOR = "vs2022-clangcl" if os.name == "nt" else "ninja"
 
+_IS_WINDOWS = os.name == "nt"
+
 # Format names shown in the UI.
 FMT_ELF, FMT_SELF, FMT_UNKNOWN = "ELF", "SELF", "unknown"
 
@@ -55,6 +57,41 @@ def default_python() -> str:
     if not getattr(sys, "frozen", False):
         return sys.executable
     return shutil.which("py") or shutil.which("python") or shutil.which("python3") or "python"
+
+
+def find_cmake(configured: str = "cmake") -> str | None:
+    """Resolve the CMake to run.
+
+    Visual Studio installs its own CMake but only puts it on PATH inside a
+    Developer Prompt, so a plain "cmake" usually fails from a normal shell.
+    Look there and in the standalone installer's folder too.
+    """
+    if configured and os.path.isfile(configured):
+        return configured
+    if found := shutil.which(configured or "cmake"):
+        return found
+    if not _IS_WINDOWS:
+        return None
+    candidates = []
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    vswhere = Path(pf86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if vswhere.is_file():
+        import subprocess
+        try:
+            out = subprocess.run([str(vswhere), "-all", "-products", "*", "-property",
+                                  "installationPath"], capture_output=True, text=True,
+                                 timeout=15).stdout
+            candidates += [Path(line.strip()) for line in out.splitlines() if line.strip()]
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), pf86):
+        candidates += sorted((Path(base) / "Microsoft Visual Studio").glob("*/*"), reverse=True)
+    for vs in candidates:
+        exe = vs / "Common7" / "IDE" / "CommonExtensions" / "Microsoft" / "CMake" / "CMake" / "bin" / "cmake.exe"
+        if exe.is_file():
+            return str(exe)
+    exe = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "CMake" / "bin" / "cmake.exe"
+    return str(exe) if exe.is_file() else None
 
 
 @dataclass
@@ -179,14 +216,15 @@ def recompile_steps(project: Project, s: Settings) -> list[Step]:
 
 
 def build_steps(project: Project, s: Settings) -> list[Step]:
-    configure = [s.cmake, "-S", str(ROOT), "-B", str(s.build_dir),
+    cmake = find_cmake(s.cmake) or s.cmake
+    configure = [cmake, "-S", str(ROOT), "-B", str(s.build_dir),
                  *GENERATORS[s.generator][1],
                  f"-DPS3RECOMP_DIR={s.toolkit_dir}",
                  f"-DRECOMP_DIR={s.recompiled_dir}",
                  f"-DPORT_NAME={project.port_name}"]
     if not s.multi_config:
         configure.append(f"-DCMAKE_BUILD_TYPE={s.build_type}")
-    build = [s.cmake, "--build", str(s.build_dir), "--parallel"]
+    build = [cmake, "--build", str(s.build_dir), "--parallel"]
     if s.multi_config:
         build += ["--config", s.build_type]
     return [
