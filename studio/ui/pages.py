@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QUrl, Signal
@@ -11,12 +12,12 @@ from PySide6.QtWidgets import QFileDialog, QGridLayout, QHBoxLayout, QVBoxLayout
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, FluentIcon, IconWidget,
                             IndeterminateProgressBar, InfoBadge, InfoBar, InfoBarIcon,
                             InfoBarPosition, LineEdit, PrimaryPushButton, PushButton,
-                            StrongBodyLabel, Theme, setTheme)
+                            StrongBodyLabel, Theme, ToolButton, setTheme)
 
 from .. import config, rpcs3
 from ..pipeline import (FMT_ELF, FMT_SELF, GENERATORS, Project, Settings, build_steps,
                         detect_format, executable_path, find_cmake, find_param_sfo, guess_game_root,
-                        launch_argv, recompile_steps, sanitize_name, Step)
+                        launch_argv, new_log_dir, recompile_steps, sanitize_name, Step, zip_logs)
 from ..runner import StepRunner
 from ..sfo import read_sfo
 from .widgets import Card, Field, IntEdit, LogView, Page, PathPicker, button, hline
@@ -53,6 +54,54 @@ def toast(parent: QWidget, kind: str, title: str, text: str) -> None:
     fn = {"ok": InfoBar.success, "warn": InfoBar.warning, "err": InfoBar.error}.get(kind, InfoBar.info)
     fn(title, text, parent=parent.window(), position=InfoBarPosition.TOP_RIGHT,
        duration=5000 if kind != "err" else 8000)
+
+
+def make_log_dir(parent: QWidget, s: Settings, label: str) -> Path | None:
+    """A fresh logs/<run>/ folder, or None (with a warning) if it cannot be created."""
+    try:
+        return new_log_dir(s, label)
+    except OSError as e:
+        toast(parent, "warn", "Logs not saved", f"Could not create {s.logs_dir}: {e}")
+        return None
+
+
+def save_log(parent: QWidget, src: Path | None, name: str) -> None:
+    """Ask where to put a copy of one step's log file."""
+    if not src or not src.is_file():
+        toast(parent, "warn", "No log yet", "Run this step first.")
+        return
+    dest, _ = QFileDialog.getSaveFileName(parent, "Export log", str(Path.home() / name),
+                                          "Log files (*.log *.txt);;All files (*)")
+    if not dest:
+        return
+    try:
+        shutil.copyfile(src, dest)
+    except OSError as e:
+        toast(parent, "err", "Export failed", str(e))
+        return
+    toast(parent, "ok", "Log exported", os.path.basename(dest))
+
+
+def export_run_logs(parent: QWidget, log_dir: Path | None) -> None:
+    """Ask where to save every log of a run as one .zip."""
+    if not log_dir or not log_dir.is_dir():
+        toast(parent, "warn", "No logs yet", "Run something first; its logs can then be exported.")
+        return
+    dest, _ = QFileDialog.getSaveFileName(parent, "Export logs", str(Path.home() / f"{log_dir.name}.zip"),
+                                          "Zip archives (*.zip)")
+    if not dest:
+        return
+    try:
+        zip_logs(log_dir, Path(dest))
+    except OSError as e:
+        toast(parent, "err", "Export failed", str(e))
+        return
+    toast(parent, "ok", "Logs exported", os.path.basename(dest))
+
+
+def open_folder(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +237,12 @@ class StepRow(QWidget):
     ICONS = {"idle": FluentIcon.REMOVE, "run": FluentIcon.SYNC, "ok": InfoBarIcon.SUCCESS,
              "fail": InfoBarIcon.ERROR, "skip": FluentIcon.REMOVE}
 
+    exportLog = Signal()
+
     def __init__(self, step: Step, parent=None):
         super().__init__(parent)
+        self.step = step
+        self.log_path: Path | None = None
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 4, 0, 4)
         row.setSpacing(14)
@@ -208,10 +261,19 @@ class StepRow(QWidget):
         row.addWidget(text, 1)
         self.status = CaptionLabel("", self)
         row.addWidget(self.status)
+        self.btn_log = ToolButton(FluentIcon.SAVE, self)
+        self.btn_log.setToolTip(f"Export the {step.title} log")
+        self.btn_log.setEnabled(False)
+        self.btn_log.clicked.connect(lambda: self.exportLog.emit())
+        row.addWidget(self.btn_log)
 
     def set_state(self, state: str, note: str = "") -> None:
         self.icon.setIcon(self.ICONS[state])
         self.status.setText(note)
+
+    def set_log(self, path: Path | None) -> None:
+        self.log_path = path
+        self.btn_log.setEnabled(path is not None)
 
 
 class RecompilePage(Page):
@@ -227,6 +289,7 @@ class RecompilePage(Page):
         self.runner.finished.connect(self._finished)
         self.rows: list[StepRow] = []
         self.active: list[int] = []   # row index for each running step
+        self.log_dir: Path | None = None   # logs/<run>/ of the latest run
 
         actions = QWidget(self.view)
         ar = QHBoxLayout(actions)
@@ -254,6 +317,10 @@ class RecompilePage(Page):
         self.steps_card.body.addWidget(self.steps_box)
 
         log_card = self.add(Card("Output", FluentIcon.COMMAND_PROMPT, self.view))
+        log_card.header.addWidget(button("Export logs", FluentIcon.SAVE,
+                                         lambda: export_run_logs(self, self.log_dir), log_card))
+        log_card.header.addWidget(button("Logs folder", FluentIcon.FOLDER,
+                                         lambda: open_folder(self.state.settings.logs_dir), log_card))
         log_card.header.addWidget(button("Copy", FluentIcon.COPY, self._copy_log, log_card))
         log_card.header.addWidget(button("Clear", FluentIcon.DELETE, lambda: self.log.clear(), log_card))
         self.log = LogView(log_card)
@@ -278,6 +345,7 @@ class RecompilePage(Page):
         self.rows = []
         for step in self._all_steps():
             row = StepRow(step, self.steps_box)
+            row.exportLog.connect(lambda r=row: self._export_step_log(r))
             self.steps_layout.addWidget(row)
             self.rows.append(row)
         self._update_launch()
@@ -328,9 +396,11 @@ class RecompilePage(Page):
         self.active = list(indices)
         for i, r in enumerate(self.rows):
             r.set_state("idle" if i in self.active else "skip", "" if i in self.active else "skipped")
-        self.log.append_text(f"\n=== {self.state.project.port_name} ===\n")
+        self.log_dir = make_log_dir(self, self.state.settings, self.state.project.port_name)
+        self.log.append_text(f"\n=== {self.state.project.port_name} ===\n"
+                             + (f"(logs: {self.log_dir})\n" if self.log_dir else ""))
         self._set_busy(True)
-        self.runner.run([steps[i] for i in self.active])
+        self.runner.run([steps[i] for i in self.active], log_dir=self.log_dir)
 
     def launch(self) -> None:
         if self.runner.running:
@@ -338,8 +408,10 @@ class RecompilePage(Page):
         argv, env = launch_argv(self.state.project, self.state.settings)
         self.active = []
         self._set_busy(True)
-        self.log.append_text("\n=== launch ===\n")
-        self.runner.run([Step("launch", "Launch", "", argv, cwd=str(Path(argv[0]).parent))], env)
+        self.log_dir = make_log_dir(self, self.state.settings, f"{self.state.project.port_name}-launch")
+        self.log.append_text("\n=== launch ===\n" + (f"(log: {self.log_dir})\n" if self.log_dir else ""))
+        self.runner.run([Step("launch", "Launch", "", argv, cwd=str(Path(argv[0]).parent))], env,
+                        log_dir=self.log_dir)
 
     # -- runner callbacks --------------------------------------------------
 
@@ -351,6 +423,7 @@ class RecompilePage(Page):
     def _step_started(self, i: int) -> None:
         if (r := self._row(i)):
             r.set_state("run", "running…")
+            r.set_log(self.runner.log_paths[i])
 
     def _step_finished(self, i: int, ok: bool, secs: float) -> None:
         if (r := self._row(i)):
@@ -372,6 +445,9 @@ class RecompilePage(Page):
             b.setEnabled(not busy)
         self.btn_cancel.setEnabled(busy)
         self._update_launch()
+
+    def _export_step_log(self, row: StepRow) -> None:
+        save_log(self, row.log_path, f"{self.state.project.port_name}-{row.step.key}.log")
 
     def _copy_log(self) -> None:
         QGuiApplication.clipboard().setText(self.log.toPlainText())
@@ -431,6 +507,7 @@ class Rpcs3Page(Page):
         self.btn_snap = button("Capture snapshot", FluentIcon.CAMERA, self._snapshot, snap, PrimaryPushButton)
         row.addWidget(self.btn_snap)
         row.addWidget(button("Open folder", FluentIcon.FOLDER, self._open_out, snap))
+        row.addWidget(button("Export log", FluentIcon.SAVE, self._export_snap_log, snap))
         row.addStretch(1)
         snap.body.addLayout(row)
         self.log = LogView(snap)
@@ -484,7 +561,8 @@ class Rpcs3Page(Page):
         s.out_dir.mkdir(parents=True, exist_ok=True)
         argv, self._snap_out = rpcs3.snapshot_argv(self.state.project, s, self.delay.value())
         self.btn_snap.setEnabled(False)
-        self.runner.run([Step("snapshot", "Snapshot", "", argv)])
+        self.runner.run([Step("snapshot", "Snapshot", "", argv)],
+                        log_dir=make_log_dir(self, s, "rpcs3-snapshot"))
 
     def _snap_done(self, ok: bool) -> None:
         self.btn_snap.setEnabled(True)
@@ -494,9 +572,11 @@ class Rpcs3Page(Page):
             toast(self, "err", "Snapshot failed", "See the log. Is RPCS3's GDB server enabled?")
 
     def _open_out(self) -> None:
-        d = self.state.settings.out_dir
-        d.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
+        open_folder(self.state.settings.out_dir)
+
+    def _export_snap_log(self) -> None:
+        path = self.runner.log_paths[0] if self.runner.log_paths else None
+        save_log(self, path, f"{self.state.project.port_name}-rpcs3-snapshot.log")
 
 
 # ---------------------------------------------------------------------------

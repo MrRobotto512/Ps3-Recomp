@@ -117,3 +117,21 @@ def test_find_cmake_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("ProgramFiles", str(tmp_path / "none"))
     monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "none86"))
     assert p.find_cmake("cmake") is None
+
+
+def test_step_logs_and_zip(tmp_path):
+    import zipfile
+    s = p.Settings(work_dir=str(tmp_path))
+    first, second = p.new_log_dir(s, "MyGame"), p.new_log_dir(s, "MyGame")
+    assert first.parent == s.logs_dir and first != second   # same second, still unique
+    step = p.Step("lift", "Lift PPU code", "", ["python", "lift me.py"])
+    log = p.StepLog(first / p.step_log_name(1, step), step)
+    log.write("lifting...\n")
+    log.close(False, 3)
+    log.close(True)   # a second close is a no-op
+    assert log.path.name == "02-lift.log"
+    text = log.path.read_text(encoding="utf-8")
+    assert '# command  python "lift me.py"' in text and "lifting..." in text
+    assert "FAILED (exit code 3)" in text
+    with zipfile.ZipFile(p.zip_logs(first, tmp_path / "logs.zip")) as z:
+        assert z.namelist() == [f"{first.name}/02-lift.log"]

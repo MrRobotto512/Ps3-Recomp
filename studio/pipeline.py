@@ -10,6 +10,8 @@ import os
 import re
 import shutil
 import sys
+import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -121,6 +123,10 @@ class Settings:
     @property
     def build_dir(self) -> Path:
         return Path(self.work_dir) / "build"
+
+    @property
+    def logs_dir(self) -> Path:
+        return Path(self.work_dir) / "logs"
 
     @property
     def multi_config(self) -> bool:
@@ -245,3 +251,63 @@ def launch_argv(project: Project, s: Settings) -> tuple[list[str], dict[str, str
     argv = [str(executable_path(project, s)), str(elf_for(project, s))]
     env = {"PS3_VFS_ROOT": project.game_root} if project.game_root else {}
     return argv, env
+
+
+# ---------------------------------------------------------------------------
+# Logs: every run gets a folder under logs/, with one file per step.
+# ---------------------------------------------------------------------------
+
+def new_log_dir(s: Settings, label: str) -> Path:
+    """logs/<date-time>-<label>/, made unique if two runs start in the same second."""
+    base = s.logs_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{label}"
+    d, n = base, 1
+    while d.exists():
+        n += 1
+        d = base.with_name(f"{base.name}-{n}")
+    d.mkdir(parents=True)
+    return d
+
+
+def step_log_name(index: int, step: Step) -> str:
+    return f"{index + 1:02d}-{step.key}.log"
+
+
+def quote_argv(argv: list[str]) -> str:
+    return " ".join(f'"{a}"' if " " in a else a for a in argv)
+
+
+class StepLog:
+    """One step's output file: a header with the command, the output, then the result."""
+
+    def __init__(self, path: Path, step: Step):
+        self.path = path
+        self._f = open(path, "w", encoding="utf-8", newline="")
+        self._started = time.monotonic()
+        self.write(f"# {step.title}\n"
+                   f"# started  {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                   f"# cwd      {step.cwd or os.getcwd()}\n"
+                   f"# command  {quote_argv(step.argv)}\n\n")
+
+    def write(self, text: str) -> None:
+        if self._f is not None:
+            self._f.write(text)
+            self._f.flush()
+
+    def close(self, ok: bool, code: int | None = None) -> None:
+        if self._f is None:
+            return
+        result = "ok" if ok else "FAILED" + (f" (exit code {code})" if code is not None else "")
+        self.write(f"\n\n# finished {time.strftime('%Y-%m-%d %H:%M:%S')}, "
+                   f"{time.monotonic() - self._started:.1f} s: {result}\n")
+        self._f.close()
+        self._f = None
+
+
+def zip_logs(log_dir: Path, dest: Path) -> Path:
+    """Pack a run's log folder into one .zip, e.g. to attach to a bug report."""
+    dest = Path(dest)
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(Path(log_dir).iterdir()):
+            if f.is_file():
+                z.write(f, f"{Path(log_dir).name}/{f.name}")
+    return dest
