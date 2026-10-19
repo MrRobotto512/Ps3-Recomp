@@ -267,6 +267,39 @@ def test_libsre_step_and_configure(tmp_path):
     assert spu[spu.index("--libsre-image") + 1] == str(s.prx_dir / "libsre.linked.bin")
 
 
+def test_config_survives_another_pc_and_a_moved_checkout(tmp_path, monkeypatch):
+    import json
+    from studio import config
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    s = p.Settings()
+    s.reference_port = str(tmp_path)                       # outside the checkout: kept absolute
+    config.save(s, p.Project(port_name="Infamous", raw_spu="pm_wwsjob=0x69C880:0x2D80@0xA00/0x2BF0"))
+    saved = json.loads(config.config_path().read_text())["settings"]
+    assert saved["toolkit_dir"] == "ps3recomp" and saved["work_dir"] == "."   # relative to the checkout
+    assert saved["reference_port"] == str(tmp_path.resolve())
+    notes = []
+    s2, proj = config.load(notes)
+    assert s2.toolkit_dir == str(p.ROOT / "ps3recomp") and s2.work_dir == str(p.ROOT)
+    assert proj.raw_spu.startswith("pm_wwsjob=") and notes == []
+
+    # A config from another PC: paths that do not exist here, wrong types, unknown values.
+    config.config_path().write_text(json.dumps({"settings": {
+        "toolkit_dir": r"C:\Users\someone\Ps3-Recomp\ps3recomp", "work_dir": r"D:\nowhere",
+        "python": r"C:\Users\someone\.venv\Scripts\pythonw.exe", "cmake": r"E:\cmake.exe",
+        "generator": "vs2031", "chunks": "64", "reference_port": r"D:\gone", "future_setting": 1},
+        "project": {"port_name": "Infamous", "lift_spu": "yes"}}))
+    notes = []
+    s3, proj3 = config.load(notes)
+    d = p.Settings()
+    assert (s3.toolkit_dir, s3.work_dir, s3.python, s3.cmake, s3.generator, s3.chunks) == \
+        (d.toolkit_dir, d.work_dir, d.python, d.cmake, d.generator, d.chunks)
+    assert s3.reference_port == "" and proj3.port_name == "Infamous" and proj3.lift_spu is True
+    assert len(notes) == 8
+
+    config.config_path().write_text("[1, 2]")              # not even an object
+    assert config.load([])[0] == p.Settings()
+
+
 def test_find_cmake_inside_visual_studio(tmp_path, monkeypatch):
     vs_cmake = (tmp_path / "PF" / "Microsoft Visual Studio" / "2022" / "Community" / "Common7"
                 / "IDE" / "CommonExtensions" / "Microsoft" / "CMake" / "CMake" / "bin" / "cmake.exe")
