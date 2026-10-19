@@ -448,8 +448,15 @@ class RecompilePage(Page):
         for i, r in enumerate(self.rows):
             r.set_state("idle" if i in self.active else "skip", "" if i in self.active else "skipped")
         self.log_dir = make_log_dir(self, self.state.settings, self.state.project.port_name)
+        s = self.state.settings
+        ref = reference_port_files(s.reference_port)
+        setup = (f"toolkit: {s.toolkit_dir}\ncompiler: {GENERATORS[s.generator][0]}\n"
+                 f"reference port: {s.reference_port or '(none)'}"
+                 + (f"\naddress map: {s.address_map}" if s.address_map else "") + "\n")
+        if ref.get("toolkit") and Path(ref["toolkit"]).resolve() != Path(s.toolkit_dir).resolve():
+            setup += "[studio] note: the reference port has its own toolkit, but another one is selected\n"
         self.log.append_text(f"\n=== {self.state.project.port_name} ===\n"
-                             + (f"(logs: {self.log_dir})\n" if self.log_dir else ""))
+                             + (f"(logs: {self.log_dir})\n" if self.log_dir else "") + setup)
         self._set_busy(True)
         self.runner.run([steps[i] for i in self.active], log_dir=self.log_dir)
 
