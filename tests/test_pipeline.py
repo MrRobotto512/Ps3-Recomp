@@ -119,6 +119,40 @@ def test_build_progress_counts_fresh_lifted_objects(tmp_path):
     assert p.build_progress(project, s, since=2000) == (2, 3)
 
 
+def make_ppu_elf(path: Path, vaddr: int, payload: bytes) -> None:
+    """A minimal 64-bit big-endian ELF with one PT_LOAD holding payload at vaddr."""
+    ehdr = b"\x7fELF\x02\x02\x01" + b"\0" * 9 + struct.pack(">HHIQQQIHHHHHH", 2, 21, 1, 0, 0x40,
+                                                                0, 0, 64, 56, 1, 0, 0, 0)
+    phdr = struct.pack(">IIQQQQQQ", 1, 5, 0x78, vaddr, vaddr, len(payload), len(payload), 0x10000)
+    path.write_bytes(ehdr + phdr + payload)
+
+
+def test_wrap_raw_spu_program(tmp_path):
+    import subprocess
+    sys.path.insert(0, str(p.ROOT / "ps3recomp" / "tools"))
+    from build_spu_workloads import fnv1a64, text_fp
+    code = bytes(range(256)) * 4
+    elf = tmp_path / "EBOOT.elf"
+    make_ppu_elf(elf, 0x10000, b"\0" * 0x100 + code + b"\0" * 0x40)
+    out = tmp_path / "raw"
+    subprocess.run([sys.executable, str(p.ROOT / "scripts" / "wrap_spu_raw.py"), str(elf),
+                    "--program", "0x10100:1024", "--out-dir", str(out)], check=True)
+    wrapped = (out / "spu_raw_00010100.elf").read_bytes()
+    # The lift is registered under the fingerprint of the code itself, which is
+    # what the runtime computes from the guest's copy of the policy module.
+    assert text_fp(wrapped) == fnv1a64(code)
+
+    s = p.Settings(work_dir=str(tmp_path / "w"), generator="ninja")
+    project = p.Project(eboot=str(elf), raw_spu="0x10100:1024")
+    steps = p.build_steps(project, s)
+    assert [x.key for x in steps] == ["rawspu", "configure", "build"]
+    assert steps[0].argv[-2:] == ["--program", "0x10100:1024"]
+    spu = next(a for a in steps[1].argv if a.startswith("-DPORT_SPU_INPUTS="))
+    assert spu.endswith(";" + str(p.raw_spu_dir(s) / "spu_raw_00010100.elf"))
+    project.lift_spu = False
+    assert [x.key for x in p.build_steps(project, s)] == ["configure", "build"]
+
+
 def test_launch_sets_vfs_root(tmp_path):
     project = p.Project(eboot=str(tmp_path / "EBOOT.elf"), game_root=str(tmp_path), port_name="G")
     argv, env = p.launch_argv(project, p.Settings(work_dir=str(tmp_path), generator="ninja"))

@@ -70,6 +70,9 @@ def main():
     ap.add_argument("--libsre", type=Path, metavar="libsre.prx",
                     help="your decrypted libsre.prx: lift Sony's SPURS library and run it "
                          "instead of the HLE one (see scripts/lift_libsre.py)")
+    ap.add_argument("--raw-spu", default="", metavar="VADDR:SIZE,...",
+                    help="raw SPU policy modules to lift (see scripts/wrap_spu_raw.py); "
+                         "inFamous: 0x69C880:11648")
     ap.add_argument("--no-spu", action="store_true",
                     help="don't lift the SPU programs embedded in the executable")
     ap.add_argument("--generator", choices=list(GENERATORS), default=s.generator)
@@ -92,7 +95,8 @@ def main():
 
     project = Project(eboot=str(args.input.resolve()), game_root=guess_game_root(args.input),
                       port_name=args.name, lift_spu=not args.no_spu,
-                      libsre=str(args.libsre.resolve()) if args.libsre else "")
+                      libsre=str(args.libsre.resolve()) if args.libsre else "",
+                      raw_spu=args.raw_spu)
     if args.clean and s.recompiled_dir.exists():
         shutil.rmtree(s.recompiled_dir)
     s.out_dir.mkdir(parents=True, exist_ok=True)
