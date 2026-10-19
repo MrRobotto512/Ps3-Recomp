@@ -181,8 +181,20 @@ elseif(PORT_ENABLE_SPU)
     endif()
 endif()
 
+# PORT_INSTRUMENTED_RUNNER: boot through the toolkit's instrumented runner
+# (runtime/ppu/tests/boot_main.cpp: crash filter, a hang watchdog that dumps
+# every guest thread at 8 s and 15 s, the PS3_DEBUG console, the PS3_SAMPLE
+# profiler, and the RSX_LIVE_DRAW renderer) instead of the minimal main.cpp.
+option(PORT_INSTRUMENTED_RUNNER "Use the toolkit's instrumented boot runner" OFF)
+if(PORT_INSTRUMENTED_RUNNER)
+    set(PORT_MAIN_SRC "${PS3RECOMP_DIR}/runtime/ppu/tests/boot_main.cpp")
+    message(STATUS "Runner:          instrumented (boot_main.cpp)")
+else()
+    set(PORT_MAIN_SRC main.cpp)
+endif()
+
 add_executable(${PROJECT_NAME}
-    main.cpp
+    ${PORT_MAIN_SRC}
     stubs.cpp
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
@@ -229,6 +241,33 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ps3recomp_runtime
 )
+
+# ---------------------------------------------------------------------------
+# Lifted firmware PRX (optional): libsre, the real cellSpurs/cellSync
+# ---------------------------------------------------------------------------
+# scripts/lift_libsre.py writes Sony's libsre, relocated and lifted, into
+# PORT_PRX_DIR. With it present prx_boot.cpp loads it at startup and the game's
+# SPURS imports run the real library instead of the HLE one. It is firmware:
+# PORT_PRX_DIR lives outside git and a build that includes it is not to be shared.
+set(PORT_PRX_DIR "" CACHE PATH "Folder holding the lifted libsre (scripts/lift_libsre.py)")
+if(PORT_PRX_DIR AND EXISTS "${PORT_PRX_DIR}/libsre_exports.c")
+    file(TO_CMAKE_PATH "${PORT_PRX_DIR}" PORT_PRX_DIR_FWD)
+    file(GLOB PORT_PRX_LIFTED CONFIGURE_DEPENDS "${PORT_PRX_DIR_FWD}/libsre_recomp*.cpp")
+    target_sources(${PROJECT_NAME} PRIVATE
+        ${PORT_PRX_LIFTED}
+        "${PORT_PRX_DIR_FWD}/libsre_exports.c"
+        prx_boot.cpp)
+    target_include_directories(${PROJECT_NAME} PRIVATE "${PS3RECOMP_DIR}/runtime/prx")
+    # Only these two files need to know; a target-wide define would change the
+    # compile command of every lifted game file and rebuild all of them.
+    set_source_files_properties(stubs.cpp prx_boot.cpp PROPERTIES
+        COMPILE_DEFINITIONS "PORT_PRX_LOADER=1;PORT_PRX_DIR=\"${PORT_PRX_DIR_FWD}\"")
+    list(APPEND RECOMP_SOURCES ${PORT_PRX_LIFTED})   # same flags as the game's lift, below
+    list(LENGTH PORT_PRX_LIFTED PORT_PRX_COUNT)
+    message(STATUS "Firmware PRX:    libsre, ${PORT_PRX_COUNT} lifted file(s) in ${PORT_PRX_DIR_FWD}")
+elseif(PORT_PRX_DIR)
+    message(STATUS "Firmware PRX:    none in ${PORT_PRX_DIR} (run scripts/lift_libsre.py) -- HLE SPURS")
+endif()
 
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the
 # link language from the generated C would leave the C++ standard library out.

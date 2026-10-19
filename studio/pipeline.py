@@ -108,6 +108,10 @@ class Settings:
     jobs: int = 0                      # parallel compiles; 0 = one per CPU thread
     rpcs3: str = ""                    # path to rpcs3.exe
     theme: str = "auto"                # auto | light | dark
+    # The toolkit's boot runner (hang watchdog, crash filter, RSX_LIVE_DRAW)
+    # instead of the minimal main.cpp.
+    instrumented_runner: bool = True
+    launch_env: str = ""               # extra KEY=VALUE pairs for the port, e.g. RSX_LIVE_DRAW=1
 
     @property
     def tools(self) -> Path:
@@ -124,6 +128,10 @@ class Settings:
     @property
     def build_dir(self) -> Path:
         return Path(self.work_dir) / "build"
+
+    @property
+    def prx_dir(self) -> Path:
+        return Path(self.work_dir) / "prx"
 
     @property
     def logs_dir(self) -> Path:
@@ -143,6 +151,9 @@ class Project:
     # SPURS workloads, tasks and jobs have native code to run. Without them a
     # SPURS game boots and then waits forever on work no SPU ever does.
     lift_spu: bool = True
+    # Your decrypted libsre.prx. When set, Sony's real SPURS library is lifted
+    # and run instead of ps3recomp's HLE one (scripts/lift_libsre.py).
+    libsre: str = ""
 
 
 @dataclass
@@ -223,6 +234,12 @@ def recompile_steps(project: Project, s: Settings) -> list[Step]:
          "--hle-stubs", str(s.out_dir / f"{elf.stem}.imports.json"),
          "--chunks", str(s.chunks),
          "--output", str(s.recompiled_dir)]))
+    if project.libsre:
+        steps.append(Step(
+            "libsre", "Lift libsre",
+            "Lift Sony's SPURS library so the game runs it instead of the HLE one.",
+            [py, str(ROOT / "scripts" / "lift_libsre.py"), project.libsre,
+             "--output", str(s.prx_dir), "--toolkit", s.toolkit_dir]))
     return steps
 
 
@@ -233,7 +250,9 @@ def build_steps(project: Project, s: Settings) -> list[Step]:
                  f"-DPS3RECOMP_DIR={s.toolkit_dir}",
                  f"-DRECOMP_DIR={s.recompiled_dir}",
                  f"-DPORT_NAME={project.port_name}",
-                 f"-DPORT_SPU_INPUTS={elf_for(project, s) if project.lift_spu else ''}"]
+                 f"-DPORT_SPU_INPUTS={elf_for(project, s) if project.lift_spu else ''}",
+                 f"-DPORT_PRX_DIR={s.prx_dir if project.libsre else ''}",
+                 f"-DPORT_INSTRUMENTED_RUNNER={'ON' if s.instrumented_runner else 'OFF'}"]
     if not s.multi_config:
         configure.append(f"-DCMAKE_BUILD_TYPE={s.build_type}")
     build = [cmake, "--build", str(s.build_dir), "--parallel", *([str(s.jobs)] if s.jobs > 0 else [])]
@@ -282,8 +301,20 @@ def executable_path(project: Project, s: Settings) -> Path:
 def launch_argv(project: Project, s: Settings) -> tuple[list[str], dict[str, str]]:
     """Command and extra environment that start the built port."""
     argv = [str(executable_path(project, s)), str(elf_for(project, s))]
-    env = {"PS3_VFS_ROOT": project.game_root} if project.game_root else {}
+    env = parse_env(s.launch_env)
+    if project.game_root:
+        env["PS3_VFS_ROOT"] = project.game_root
     return argv, env
+
+
+def parse_env(text: str) -> dict[str, str]:
+    """'A=1 B=two; C=3' -> {'A': '1', 'B': 'two', 'C': '3'}. Words without '=' are ignored."""
+    env = {}
+    for item in re.split(r"[\s;]+", text or ""):
+        key, sep, value = item.partition("=")
+        if sep and key:
+            env[key] = value
+    return env
 
 
 # ---------------------------------------------------------------------------

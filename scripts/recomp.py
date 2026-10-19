@@ -67,6 +67,9 @@ def main():
     ap.add_argument("--clean", action="store_true", help="delete the previous lift first")
     ap.add_argument("--build", action="store_true", help="also configure and build the port")
     ap.add_argument("--name", default="PS3Port", help="executable name (default: %(default)s)")
+    ap.add_argument("--libsre", type=Path, metavar="libsre.prx",
+                    help="your decrypted libsre.prx: lift Sony's SPURS library and run it "
+                         "instead of the HLE one (see scripts/lift_libsre.py)")
     ap.add_argument("--no-spu", action="store_true",
                     help="don't lift the SPU programs embedded in the executable")
     ap.add_argument("--generator", choices=list(GENERATORS), default=s.generator)
@@ -88,7 +91,8 @@ def main():
         sys.exit(f"{args.input} is neither an ELF nor a SELF")
 
     project = Project(eboot=str(args.input.resolve()), game_root=guess_game_root(args.input),
-                      port_name=args.name, lift_spu=not args.no_spu)
+                      port_name=args.name, lift_spu=not args.no_spu,
+                      libsre=str(args.libsre.resolve()) if args.libsre else "")
     if args.clean and s.recompiled_dir.exists():
         shutil.rmtree(s.recompiled_dir)
     s.out_dir.mkdir(parents=True, exist_ok=True)

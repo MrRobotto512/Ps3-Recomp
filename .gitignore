@@ -5,6 +5,10 @@ game/
 *.BIN
 *.SFO
 *.rap
+# Firmware, and anything lifted from it (scripts/lift_libsre.py)
+*.prx
+*.sprx
+prx/
 
 # Pipeline output (regenerate with the app or scripts/recomp.py)
 out/

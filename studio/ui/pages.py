@@ -155,6 +155,12 @@ class GamePage(Page):
         self.name.setPlaceholderText("PS3Port")
         self.name.editingFinished.connect(self._name_changed)
         info.body.addWidget(Field("Port name", self.name, "Name of the .exe that gets built"))
+        self.libsre = PathPicker("file", "Decrypted PRX (*.prx *.elf);;All files (*)",
+                                 "Optional: …/libsre.prx")
+        self.libsre.changed.connect(self._libsre_changed)
+        info.body.addWidget(Field("libsre.prx", self.libsre,
+                                  "Runs Sony's SPURS instead of the HLE one; inFamous needs it. "
+                                  "Decrypt dev_flash/sys/external/libsre.sprx with RPCS3"))
         self.spu = CheckBox("Lift the SPU programs in the executable", info)
         self.spu.stateChanged.connect(self._spu_changed)
         info.body.addWidget(Field("SPU", self.spu,
@@ -169,6 +175,7 @@ class GamePage(Page):
         self.eboot.setText(p.eboot)
         self.root.setText(p.game_root)
         self.name.setText(p.port_name)
+        self.libsre.setText(p.libsre)
         self.spu.blockSignals(True)
         self.spu.setChecked(p.lift_spu)
         self.spu.blockSignals(False)
@@ -234,6 +241,10 @@ class GamePage(Page):
 
     def _root_changed(self, path: str) -> None:
         self.state.project.game_root = path
+        self.state.touch()
+
+    def _libsre_changed(self, path: str) -> None:
+        self.state.project.libsre = path
         self.state.touch()
 
     def _spu_changed(self, _=None) -> None:
@@ -669,6 +680,22 @@ class SettingsPage(Page):
         bd.body.addWidget(Field("Parallel compiles", _left(self.jobs),
                                 "Files compiled at once; 0 = one per CPU thread. Lower it if the "
                                 "build runs out of memory"))
+
+        rn = self.add(Card("Running the port", FluentIcon.GAME, self.view))
+        self.runner_box = CheckBox("Use the toolkit's diagnostic runner", rn)
+        self.runner_box.setChecked(s.instrumented_runner)
+        self.runner_box.stateChanged.connect(
+            lambda _: self._set("instrumented_runner", self.runner_box.isChecked()))
+        rn.body.addWidget(Field("Runner", self.runner_box,
+                                "Hang watchdog, crash reports and the RSX_LIVE_DRAW renderer. "
+                                "Takes effect on the next build"))
+        self.launch_env = LineEdit(rn)
+        self.launch_env.setPlaceholderText("RSX_LIVE_DRAW=1")
+        self.launch_env.setText(s.launch_env)
+        self.launch_env.editingFinished.connect(
+            lambda: self._set("launch_env", self.launch_env.text().strip()))
+        rn.body.addWidget(Field("Launch environment", self.launch_env,
+                                "KEY=VALUE pairs for the port, separated by spaces"))
 
         ap = self.add(Card("Appearance", FluentIcon.PALETTE, self.view))
         self.theme = ComboBox(ap)
