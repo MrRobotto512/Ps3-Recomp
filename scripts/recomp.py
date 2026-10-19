@@ -29,13 +29,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from studio.pipeline import (FMT_SELF, FMT_UNKNOWN, GENERATORS, Project, Settings,  # noqa: E402
                              StepLog, build_steps, detect_format, executable_path,
                              guess_game_root, launch_argv, new_log_dir, quote_argv,
-                             recompile_steps, step_log_name, zip_logs)
+                             recompile_steps, reference_port_files, step_log_name, zip_logs)
 
 
 def run_logged(step, log_path: Path) -> int:
     """Run a step, echoing its output to the console and to its log file."""
     log = StepLog(log_path, step)
-    env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+    env = dict(os.environ, **step.resolved_env(), PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
     try:
         proc = subprocess.Popen(step.argv, cwd=step.cwd, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -70,9 +70,15 @@ def main():
     ap.add_argument("--libsre", type=Path, metavar="libsre.prx",
                     help="your decrypted libsre.prx: lift Sony's SPURS library and run it "
                          "instead of the HLE one (see scripts/lift_libsre.py)")
-    ap.add_argument("--raw-spu", default="", metavar="VADDR:SIZE,...",
-                    help="raw SPU policy modules to lift (see scripts/wrap_spu_raw.py); "
-                         "inFamous: 0x69C880:11648")
+    ap.add_argument("--raw-spu", default="", metavar="[NAME=]VADDR:SIZE[@BASE[/ENTRY]],...",
+                    help="raw SPU policy modules to lift (see scripts/lift_spu.py); "
+                         "inFamous (US): pm_wwsjob=0x69C880:0x2D80@0xA00/0x2BF0")
+    ap.add_argument("--reference-port", default="", metavar="DIR",
+                    help="a finished port of the game (e.g. an inFAMOUSreborn clone): use its "
+                         "toolkit, patches and job-module entry points")
+    ap.add_argument("--address-map", default="", metavar="FILE",
+                    help="the reference port's PPU addresses -> this game's (see "
+                         "scripts/apply_port_patches.py)")
     ap.add_argument("--no-spu", action="store_true",
                     help="don't lift the SPU programs embedded in the executable")
     ap.add_argument("--generator", choices=list(GENERATORS), default=s.generator)
@@ -86,6 +92,11 @@ def main():
 
     s.work_dir, s.chunks, s.generator, s.build_type = str(args.work), args.chunks, args.generator, args.config
     s.jobs = args.jobs
+    if args.reference_port:
+        s.reference_port = str(Path(args.reference_port).resolve())
+        s.toolkit_dir = reference_port_files(s.reference_port).get("toolkit", s.toolkit_dir)
+    if args.address_map:
+        s.address_map = str(Path(args.address_map).resolve())
     if not (s.tools / "ppu_lifter.py").exists():
         sys.exit("ps3recomp submodule is missing: run `git submodule update --init`")
     if not args.input.is_file():

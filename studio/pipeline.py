@@ -14,6 +14,7 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 
 
@@ -32,17 +33,20 @@ def _find_root() -> Path:
 
 ROOT = _find_root()
 
-# Generators offered in Settings. On Windows the Visual Studio generator finds
-# the compiler itself, so no "x64 Native Tools" prompt is needed; ClangCL is
-# what the ps3recomp ports are built with.
+# Generators offered in Settings. Ninja + clang-cl is how shipping ps3recomp ports
+# build (ps3recomp's own release Studio, inFAMOUSreborn, ico-recomp); Studio runs it
+# inside the Visual Studio developer environment (vs_env), so no "x64 Native Tools"
+# prompt is needed. The Visual Studio generator finds the compiler itself too.
 GENERATORS = {
+    "ninja-clangcl": ("Ninja + clang-cl (Visual Studio)",
+                      ["-G", "Ninja", "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl"]),
     "vs2022-clangcl": ("Visual Studio 2022 (clang-cl)",
                        ["-G", "Visual Studio 17 2022", "-A", "x64", "-T", "ClangCL"]),
     "vs2022-msvc": ("Visual Studio 2022 (MSVC)",
                     ["-G", "Visual Studio 17 2022", "-A", "x64"]),
     "ninja": ("Ninja (compiler from PATH)", ["-G", "Ninja"]),
 }
-DEFAULT_GENERATOR = "vs2022-clangcl" if os.name == "nt" else "ninja"
+DEFAULT_GENERATOR = "ninja-clangcl" if os.name == "nt" else "ninja"
 
 _IS_WINDOWS = os.name == "nt"
 
@@ -112,6 +116,13 @@ class Settings:
     # instead of the minimal main.cpp.
     instrumented_runner: bool = True
     launch_env: str = ""               # extra KEY=VALUE pairs for the port, e.g. RSX_LIVE_DRAW=1
+    avx2: bool = True                  # PORT_AVX2: build for AVX2/FMA/BMI2
+    # A local clone of a finished port of the same game (inFAMOUSreborn). Its
+    # patches and job-module entry map are used in place; see reference_port_files().
+    reference_port: str = ""
+    # Its release's PPU addresses -> this game's (e.g. EU -> US), so its PPU patches
+    # can be placed here too (scripts/apply_port_patches.py --address-map).
+    address_map: str = ""
 
     @property
     def tools(self) -> Path:
@@ -127,7 +138,13 @@ class Settings:
 
     @property
     def build_dir(self) -> Path:
-        return Path(self.work_dir) / "build"
+        # One per generator kind: CMake refuses to reconfigure a build folder with
+        # a different generator, so switching would otherwise fail.
+        return Path(self.work_dir) / ("build" if self.multi_config else f"build-{self.generator}")
+
+    @property
+    def spu_dir(self) -> Path:
+        return Path(self.work_dir) / "spu"
 
     @property
     def prx_dir(self) -> Path:
@@ -147,15 +164,16 @@ class Project:
     eboot: str = ""          # EBOOT.BIN or a decrypted EBOOT.elf
     game_root: str = ""      # folder holding PS3_GAME/ (the guest's disc root)
     port_name: str = "PS3Port"
-    # Lift the SPU programs embedded in the executable at configure time, so
-    # SPURS workloads, tasks and jobs have native code to run. Without them a
-    # SPURS game boots and then waits forever on work no SPU ever does.
+    # Lift the game's SPU programs (scripts/lift_spu.py), so SPURS workloads,
+    # tasks and jobs have native code to run. Without them a SPURS game boots
+    # and then waits forever on work no SPU ever does.
     lift_spu: bool = True
     # Your decrypted libsre.prx. When set, Sony's real SPURS library is lifted
     # and run instead of ps3recomp's HLE one (scripts/lift_libsre.py).
     libsre: str = ""
-    # Raw SPU programs to lift, "VADDR:SIZE[@BASE], ..." (scripts/wrap_spu_raw.py):
-    # policy modules that are bare code rather than an ELF. inFamous: 0x69C880:11648.
+    # Raw SPU programs to lift, "[NAME=]VADDR:SIZE[@BASE[/ENTRY]], ...": policy modules
+    # that are bare code rather than an ELF (scripts/lift_spu.py --raw). inFamous (US):
+    # pm_wwsjob=0x69C880:0x2D80@0xA00/0x2BF0.
     raw_spu: str = ""
 
 
@@ -166,6 +184,67 @@ class Step:
     description: str
     argv: list[str]
     cwd: str | None = None
+    # On top of the inherited environment. May be a function returning the dict, so
+    # costly setup (vs_env) runs only when the step does, not whenever steps are listed.
+    env: dict[str, str] | Callable[[], dict[str, str]] = field(default_factory=dict)
+
+    def resolved_env(self) -> dict[str, str]:
+        return self.env() if callable(self.env) else self.env
+
+
+def find_vs() -> Path | None:
+    """The newest Visual Studio with the C++ tools and its Clang component."""
+    vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / \
+        "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if not vswhere.is_file():
+        return None
+    import subprocess
+    try:
+        out = subprocess.run([str(vswhere), "-latest", "-products", "*", "-requires",
+                              "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                              "Microsoft.VisualStudio.Component.VC.Llvm.Clang",
+                              "-property", "installationPath"],
+                             capture_output=True, text=True, timeout=30).stdout.split("\n")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    paths = [Path(line.strip()) for line in out if line.strip()]
+    return paths[0] if paths else None
+
+
+_VS_ENV: dict[str, dict[str, str]] = {}
+
+
+def vs_env() -> dict[str, str]:
+    """The environment vcvars64.bat sets up, plus Visual Studio's bundled clang-cl on
+    PATH -- what Ninja + clang-cl builds in. After ico-recomp's pipeline/ico_pipeline.py
+    (MIT, (c) 2026 ico-recomp contributors). Empty off Windows or without Visual Studio."""
+    if not _IS_WINDOWS:
+        return {}
+    vs = find_vs()
+    if vs is None:
+        return {}
+    key = str(vs)
+    if key not in _VS_ENV:
+        import subprocess
+        vcvars = vs / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+        env: dict[str, str] = {}
+        try:   # any failure here means "no developer environment", never a crash
+            out = subprocess.run(f'cmd /s /c ""{vcvars}" >nul && set"', capture_output=True,
+                                 shell=True, timeout=120, stdin=subprocess.DEVNULL,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+            for line in out.decode("mbcs" if _IS_WINDOWS else "utf-8", errors="replace").splitlines():
+                k, sep, v = line.partition("=")
+                if sep and k:
+                    env[k] = v
+        except (OSError, subprocess.SubprocessError, LookupError):
+            env = {}
+        if "VCToolsInstallDir" in env:
+            path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
+            env[path_key] = f"{vs / 'VC' / 'Tools' / 'Llvm' / 'x64' / 'bin'};{env[path_key]}"
+        else:
+            env = {}
+        _VS_ENV[key] = env
+    return _VS_ENV[key]
 
 
 def detect_format(path: str | os.PathLike) -> str:
@@ -215,6 +294,15 @@ def elf_for(project: Project, s: Settings) -> Path:
     return src
 
 
+def _tool_has_option(tool: Path, option: str) -> bool:
+    """Whether a toolkit script declares an option. Toolkits differ: inFAMOUSreborn's
+    ppu_lifter.py predates --chunks and splits its output by line count instead."""
+    try:
+        return f'"{option}"' in tool.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return True   # missing toolkit: keep the option; the step reports the real problem
+
+
 def recompile_steps(project: Project, s: Settings) -> list[Step]:
     py, tools = s.python, s.tools
     src = Path(project.eboot)
@@ -235,7 +323,7 @@ def recompile_steps(project: Project, s: Settings) -> list[Step]:
         [py, str(tools / "ppu_lifter.py"), str(elf),
          "--functions", str(s.out_dir / f"{elf.stem}.functions.json"),
          "--hle-stubs", str(s.out_dir / f"{elf.stem}.imports.json"),
-         "--chunks", str(s.chunks),
+         *(["--chunks", str(s.chunks)] if _tool_has_option(tools / "ppu_lifter.py", "--chunks") else []),
          "--output", str(s.recompiled_dir)]))
     if project.libsre:
         steps.append(Step(
@@ -243,6 +331,25 @@ def recompile_steps(project: Project, s: Settings) -> list[Step]:
             "Lift Sony's SPURS library so the game runs it instead of the HLE one.",
             [py, str(ROOT / "scripts" / "lift_libsre.py"), project.libsre,
              "--output", str(s.prx_dir), "--toolkit", s.toolkit_dir]))
+    ref = reference_port_files(s.reference_port)
+    if project.lift_spu:
+        argv = [py, str(ROOT / "scripts" / "lift_spu.py"), str(elf),
+                "--out", str(s.spu_dir), "--work", str(s.out_dir / "spu_images"),
+                "--toolkit", s.toolkit_dir, "--jobmod-prefix", project.port_name.lower()]
+        for p in raw_spu_programs(project):
+            argv += ["--raw", p]
+        if project.libsre:   # libsre carries the SPURS kernel's own SPU programs
+            argv += ["--libsre-image", str(s.prx_dir / "libsre.linked.bin")]
+        if ref.get("jobmod_map"):
+            argv += ["--jobmod-extra-map", ref["jobmod_map"]]
+        steps.append(Step("spu", "Lift SPU programs",
+                          "Embedded SPU programs, raw policy modules and WWS job modules.", argv))
+    if ref.get("patches"):
+        steps.append(Step("patches", "Apply port patches",
+                          "Apply the reference port's patches where they fit this lift.",
+                          [py, str(ROOT / "scripts" / "apply_port_patches.py"), ref["patches"],
+                           "--work", s.work_dir,
+                           *(["--address-map", s.address_map] if s.address_map else [])]))
     return steps
 
 
@@ -250,33 +357,43 @@ def raw_spu_programs(project: Project) -> list[str]:
     return [p for p in re.split(r"[\s,;]+", project.raw_spu or "") if p]
 
 
-def raw_spu_dir(s: Settings) -> Path:
-    return s.out_dir / "raw_spu"
+def reference_port_files(folder: str) -> dict[str, str]:
+    """What a local clone of a finished port (inFAMOUSreborn's layout) offers this one:
+    toolkit (its ps3recomp/), patches (installer/patches), jobmod_map (the hand-found
+    job-module entry points) and launch_env (installer/*.toml [launch].env, as KEY=VALUE)."""
+    root = Path(folder) if folder else None
+    if not root or not root.is_dir():
+        return {}
+    found = {}
+    if (root / "ps3recomp" / "tools" / "ppu_lifter.py").is_file():
+        found["toolkit"] = str(root / "ps3recomp")
+    if (root / "installer" / "patches").is_dir():
+        found["patches"] = str(root / "installer" / "patches")
+    maps = sorted(root.glob("*/spu/jobmods_extra_map.json"))
+    if maps:
+        found["jobmod_map"] = str(maps[0])
+    for manifest in sorted((root / "installer").glob("*.toml")):
+        try:
+            import tomllib
+            env = tomllib.loads(manifest.read_text(encoding="utf-8")).get("launch", {}).get("env")
+        except (ImportError, OSError, ValueError):
+            continue
+        if isinstance(env, dict) and env:
+            found["launch_env"] = " ".join(f"{k}={v}" for k, v in env.items())
+            break
+    return found
 
 
 def build_steps(project: Project, s: Settings) -> list[Step]:
     cmake = find_cmake(s.cmake) or s.cmake
-    steps = []
-    # libsre carries the SPURS kernel's own SPU programs, which must be lifted
-    # too: without them the real SPURS starts SPU threads that have no code.
-    spu_inputs = [str(elf_for(project, s))] + ([project.libsre] if project.libsre else [])
-    raw = raw_spu_programs(project) if project.lift_spu else []
-    if raw:
-        # Cheap, so it runs before every configure and "Build only" picks it up.
-        argv = [s.python, str(ROOT / "scripts" / "wrap_spu_raw.py"), str(elf_for(project, s)),
-                "--out-dir", str(raw_spu_dir(s)), "--toolkit", s.toolkit_dir]
-        for p in raw:
-            argv += ["--program", p]
-        steps.append(Step("rawspu", "Extract SPU programs",
-                          "Cut the raw SPU policy modules out of the executable.", argv))
-        spu_inputs += [str(raw_spu_dir(s) / f"spu_raw_{int(p.split(':')[0], 0):08X}.elf")
-                       for p in raw]
     configure = [cmake, "-S", str(ROOT), "-B", str(s.build_dir),
                  *GENERATORS[s.generator][1],
                  f"-DPS3RECOMP_DIR={s.toolkit_dir}",
                  f"-DRECOMP_DIR={s.recompiled_dir}",
                  f"-DPORT_NAME={project.port_name}",
-                 f"-DPORT_SPU_INPUTS={';'.join(spu_inputs) if project.lift_spu else ''}",
+                 "-DPORT_SPU_INPUTS=",
+                 f"-DSPU_DIR={s.spu_dir}",
+                 f"-DPORT_AVX2={'ON' if s.avx2 else 'OFF'}",
                  f"-DPORT_PRX_DIR={s.prx_dir if project.libsre else ''}",
                  f"-DPORT_INSTRUMENTED_RUNNER={'ON' if s.instrumented_runner else 'OFF'}"]
     if not s.multi_config:
@@ -290,11 +407,10 @@ def build_steps(project: Project, s: Settings) -> list[Step]:
         build += ["--", "/p:UseMultiToolTask=true", "/p:EnforceProcessCountAcrossBuilds=true"]
         if s.jobs > 0:
             build.append(f"/p:CL_MPCount={s.jobs}")
-    return steps + [
-        Step("configure", "Configure",
-             "Generate the build with CMake" + (" and lift the SPU programs." if project.lift_spu else "."),
-             configure),
-        Step("build", "Build", "Compile the lifted code and the ps3recomp runtime.", build),
+    env = vs_env if s.generator == "ninja-clangcl" else {}   # captured when the step runs
+    return [
+        Step("configure", "Configure", "Generate the build with CMake.", configure, env=env),
+        Step("build", "Build", "Compile the lifted code and the ps3recomp runtime.", build, env=env),
     ]
 
 

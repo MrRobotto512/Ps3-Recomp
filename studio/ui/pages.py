@@ -17,7 +17,7 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, CheckBox, ComboBox, FluentI
                             StrongBodyLabel, Theme, ToolButton, setTheme)
 
 from .. import config, rpcs3
-from ..pipeline import (FMT_ELF, FMT_SELF, GENERATORS, Project, Settings, build_steps,
+from ..pipeline import (FMT_ELF, FMT_SELF, GENERATORS, Project, Settings, build_steps, reference_port_files,
                         build_progress, detect_format, executable_path, find_cmake, find_param_sfo, guess_game_root,
                         launch_argv, new_log_dir, recompile_steps, sanitize_name, Step, zip_logs)
 from ..runner import StepRunner
@@ -162,11 +162,11 @@ class GamePage(Page):
                                   "Runs Sony's SPURS instead of the HLE one; inFamous needs it. "
                                   "Decrypt dev_flash/sys/external/libsre.sprx with RPCS3"))
         self.raw_spu = LineEdit(info)
-        self.raw_spu.setPlaceholderText("e.g. 0x69C880:11648")
+        self.raw_spu.setPlaceholderText("inFamous (US): pm_wwsjob=0x69C880:0x2D80@0xA00/0x2BF0")
         self.raw_spu.editingFinished.connect(self._raw_spu_changed)
         info.body.addWidget(Field("Raw SPU programs", self.raw_spu,
-                                  "Policy modules that are bare code, as address:size. From the "
-                                  "log's \u201cPM NOT LIFTED\u201d / AddWorkload pm= line"))
+                                  "Policy modules that are bare code: [name=]address:size[@base[/entry]]. "
+                                  "Address and size from the log's AddWorkload pm= line"))
         self.spu = CheckBox("Lift the SPU programs in the executable", info)
         self.spu.stateChanged.connect(self._spu_changed)
         info.body.addWidget(Field("SPU", self.spu,
@@ -671,6 +671,15 @@ class SettingsPage(Page):
                                "out/, recompiled/ and build/ go here")
         self.python = self._path(tk, "Python", "file", s.python, "python", "Runs the lifter (3.10+)")
         self.cmake = self._path(tk, "CMake", "file", s.cmake, "cmake", "3.20+")
+        self.ref = PathPicker("dir", placeholder="e.g. a clone of github.com/whompay/inFAMOUSreborn")
+        self.ref.setText(s.reference_port)
+        self.ref.changed.connect(self._reference_changed)
+        tk.body.addWidget(Field("Reference port", self.ref,
+                                "A finished port of this game. Its toolkit, launch settings, patches "
+                                "and job-module entry points are used in place"))
+        self.amap = self._path(tk, "Address map", "file", s.address_map, "address_map",
+                               "Its release's PPU addresses to this one's (e.g. EU to US), so its "
+                               "PPU patches can be placed here too")
 
         bd = self.add(Card("Build", FluentIcon.DEVELOPER_TOOLS, self.view))
         self.gen = ComboBox(bd)
@@ -693,6 +702,12 @@ class SettingsPage(Page):
         bd.body.addWidget(Field("Parallel compiles", _left(self.jobs),
                                 "Files compiled at once; 0 = one per CPU thread. Lower it if the "
                                 "build runs out of memory"))
+        self.avx2 = CheckBox("Build for AVX2", bd)
+        self.avx2.setChecked(s.avx2)
+        self.avx2.stateChanged.connect(lambda _: self._set("avx2", self.avx2.isChecked()))
+        bd.body.addWidget(Field("CPU", self.avx2,
+                                "Any x86-64 CPU from 2013-2015 on. Some toolkits need it "
+                                "(inFAMOUSreborn's)"))
 
         rn = self.add(Card("Running the port", FluentIcon.GAME, self.view))
         self.runner_box = CheckBox("Use the toolkit's diagnostic runner", rn)
@@ -729,6 +744,25 @@ class SettingsPage(Page):
     def _set(self, attr: str, value) -> None:
         setattr(self.state.settings, attr, value)
         self.state.touch()
+
+    def _reference_changed(self, path: str) -> None:
+        """Point the toolkit and launch settings at a reference port's, in their own
+        fields, so what is in use stays visible and can be changed back."""
+        s = self.state.settings
+        s.reference_port = path
+        found = reference_port_files(path)
+        if found.get("toolkit"):
+            s.toolkit_dir = found["toolkit"]
+            self.toolkit.setText(s.toolkit_dir)
+        if found.get("launch_env"):
+            s.launch_env = found["launch_env"]
+            self.launch_env.setText(s.launch_env)
+        self.state.touch()
+        if path:
+            used = [k for k in ("toolkit", "launch_env", "patches", "jobmod_map") if k in found]
+            toast(self, "ok" if used else "warn", "Reference port",
+                  ("Using its " + ", ".join(u.replace("_", " ") for u in used) + ". Relift to apply.")
+                  if used else "No toolkit, patches or launch settings found in that folder.")
 
     def _theme_changed(self, _=None) -> None:
         key = self.theme.currentData()

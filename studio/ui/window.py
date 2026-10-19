@@ -14,7 +14,8 @@ ACCENT = "#0067c0"   # Windows 11 default accent
 class MainWindow(FluentWindow):
     def __init__(self):
         super().__init__()
-        settings, project = config.load()
+        notes: list[str] = []
+        settings, project = config.load(notes)
         self.state = State(settings, project)
         setTheme({"light": Theme.LIGHT, "dark": Theme.DARK}.get(settings.theme, Theme.AUTO))
         setThemeColor(ACCENT)
@@ -30,6 +31,9 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.settings_page, FluentIcon.SETTING, "Settings",
                              NavigationItemPosition.BOTTOM)
 
+        if notes:   # saved settings that did not fit this PC or checkout
+            self.recompile_page.log.append_text(
+                "[studio] settings adjusted for this PC:\n" + "".join(f"  {n}\n" for n in notes))
         self.setWindowTitle("PS3 Recomp Studio")
         self.setWindowIcon(QIcon(FluentIcon.GAME.path()))
         self.resize(1080, 760)
