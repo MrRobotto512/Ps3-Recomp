@@ -78,6 +78,10 @@ def test_build_steps_and_exe_path(tmp_path):
     vs = p.Settings(work_dir=str(tmp_path), generator="vs2022-clangcl", build_type="Release")
     configure, build = p.build_steps(project, vs)
     assert "ClangCL" in configure.argv and "-DPORT_NAME=MyGame" in configure.argv
+    assert "-DPORT_SPU_INPUTS=x" in configure.argv
+    project.lift_spu = False
+    assert "-DPORT_SPU_INPUTS=" in p.build_steps(project, vs)[0].argv   # cleared, not stale
+    project.lift_spu = True
     assert not any(a.startswith("-DCMAKE_BUILD_TYPE") for a in configure.argv)
     assert build.argv[build.argv.index("--config") + 1] == "Release"
     assert "/p:UseMultiToolTask=true" in build.argv[build.argv.index("--"):]
