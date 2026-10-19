@@ -79,12 +79,18 @@ def test_build_steps_and_exe_path(tmp_path):
     configure, build = p.build_steps(project, vs)
     assert "ClangCL" in configure.argv and "-DPORT_NAME=MyGame" in configure.argv
     assert not any(a.startswith("-DCMAKE_BUILD_TYPE") for a in configure.argv)
-    assert build.argv[-2:] == ["--config", "Release"]
+    assert build.argv[build.argv.index("--config") + 1] == "Release"
+    assert "/p:UseMultiToolTask=true" in build.argv[build.argv.index("--"):]
+    assert not any(a.startswith("/p:CL_MPCount") for a in build.argv)
+    vs.jobs = 6
+    build = p.build_steps(project, vs)[1].argv
+    assert build[build.index("--parallel") + 1] == "6" and "/p:CL_MPCount=6" in build
     assert p.executable_path(project, vs).parent == tmp_path / "build" / "Release"
 
     ninja = p.Settings(work_dir=str(tmp_path), generator="ninja", build_type="Debug")
     configure, build = p.build_steps(project, ninja)
     assert "-DCMAKE_BUILD_TYPE=Debug" in configure.argv and "--config" not in build.argv
+    assert "--" not in build.argv
     assert p.executable_path(project, ninja).parent == tmp_path / "build"
 
 

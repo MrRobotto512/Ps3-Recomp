@@ -59,6 +59,7 @@ The first run creates a `.venv` and installs the dependencies.
 3. **Recompile page:** *Recompile & build*, then *Launch*. All tool output
    streams into the log.
 4. **Settings:** compiler (clang-cl or MSVC), Release/RelWithDebInfo/Debug,
+   parallel compiles (lower it if a build runs out of memory),
    theme.
 
 ### Logs

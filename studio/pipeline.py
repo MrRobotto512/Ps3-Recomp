@@ -105,6 +105,7 @@ class Settings:
     generator: str = DEFAULT_GENERATOR
     build_type: str = "Release"
     chunks: int = 64
+    jobs: int = 0                      # parallel compiles; 0 = one per CPU thread
     rpcs3: str = ""                    # path to rpcs3.exe
     theme: str = "auto"                # auto | light | dark
 
@@ -230,9 +231,15 @@ def build_steps(project: Project, s: Settings) -> list[Step]:
                  f"-DPORT_NAME={project.port_name}"]
     if not s.multi_config:
         configure.append(f"-DCMAKE_BUILD_TYPE={s.build_type}")
-    build = [cmake, "--build", str(s.build_dir), "--parallel"]
+    build = [cmake, "--build", str(s.build_dir), "--parallel", *([str(s.jobs)] if s.jobs > 0 else [])]
     if s.multi_config:
         build += ["--config", s.build_type]
+        # --parallel only lets MSBuild build several projects at once. The game
+        # is one project of large lifted files, which it would then compile one
+        # after another on a single core; the multi-tool task runs them side by side.
+        build += ["--", "/p:UseMultiToolTask=true", "/p:EnforceProcessCountAcrossBuilds=true"]
+        if s.jobs > 0:
+            build.append(f"/p:CL_MPCount={s.jobs}")
     return [
         Step("configure", "Configure", "Generate the build with CMake.", configure),
         Step("build", "Build", "Compile the lifted code and the ps3recomp runtime.", build),

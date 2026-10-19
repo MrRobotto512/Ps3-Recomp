@@ -69,11 +69,15 @@ def main():
     ap.add_argument("--name", default="PS3Port", help="executable name (default: %(default)s)")
     ap.add_argument("--generator", choices=list(GENERATORS), default=s.generator)
     ap.add_argument("--config", default=s.build_type, help="build type (default: %(default)s)")
+    ap.add_argument("--jobs", type=int, default=s.jobs,
+                    help="parallel compiles (default: one per CPU thread); lower it if "
+                         "the build runs out of memory")
     ap.add_argument("--zip-logs", type=Path, metavar="FILE.zip",
                     help="also pack this run's step logs into FILE.zip")
     args = ap.parse_args()
 
     s.work_dir, s.chunks, s.generator, s.build_type = str(args.work), args.chunks, args.generator, args.config
+    s.jobs = args.jobs
     if not (s.tools / "ppu_lifter.py").exists():
         sys.exit("ps3recomp submodule is missing: run `git submodule update --init`")
     if not args.input.is_file():

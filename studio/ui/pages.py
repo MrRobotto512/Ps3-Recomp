@@ -6,7 +6,9 @@ import os
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QUrl, Signal
+import time
+
+from PySide6.QtCore import QObject, QProcess, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QFileDialog, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, FluentIcon, IconWidget,
@@ -54,6 +56,11 @@ def toast(parent: QWidget, kind: str, title: str, text: str) -> None:
     fn = {"ok": InfoBar.success, "warn": InfoBar.warning, "err": InfoBar.error}.get(kind, InfoBar.info)
     fn(title, text, parent=parent.window(), position=InfoBarPosition.TOP_RIGHT,
        duration=5000 if kind != "err" else 8000)
+
+
+def _mmss(secs: float) -> str:
+    m, s = divmod(int(secs), 60)
+    return f"{m // 60}:{m % 60:02d}:{s:02d}" if m >= 60 else f"{m}:{s:02d}"
 
 
 def make_log_dir(parent: QWidget, s: Settings, label: str) -> Path | None:
@@ -290,6 +297,14 @@ class RecompilePage(Page):
         self.rows: list[StepRow] = []
         self.active: list[int] = []   # row index for each running step
         self.log_dir: Path | None = None   # logs/<run>/ of the latest run
+        # The running step's row shows its elapsed time, and how long it has
+        # been silent, so a slow compile can be told apart from a hung one.
+        self._running_row: StepRow | None = None
+        self._step_t0 = self._last_out = 0.0
+        self.runner.output.connect(lambda _: setattr(self, "_last_out", time.monotonic()))
+        self._ticker = QTimer(self)
+        self._ticker.setInterval(1000)
+        self._ticker.timeout.connect(self._tick)
 
         actions = QWidget(self.view)
         ar = QHBoxLayout(actions)
@@ -424,10 +439,24 @@ class RecompilePage(Page):
         if (r := self._row(i)):
             r.set_state("run", "running…")
             r.set_log(self.runner.log_paths[i])
+            self._running_row, self._step_t0 = r, time.monotonic()
+            self._last_out = self._step_t0
+            self._ticker.start()
+
+    def _tick(self) -> None:
+        if self._running_row is None:
+            return
+        now = time.monotonic()
+        note = f"running… {_mmss(now - self._step_t0)}"
+        if now - self._last_out >= 60:
+            note += f" (no output for {_mmss(now - self._last_out)})"
+        self._running_row.status.setText(note)
 
     def _step_finished(self, i: int, ok: bool, secs: float) -> None:
+        self._ticker.stop()
+        self._running_row = None
         if (r := self._row(i)):
-            r.set_state("ok" if ok else "fail", f"{secs:.1f} s")
+            r.set_state("ok" if ok else "fail", f"{secs:.1f} s" if secs < 60 else _mmss(secs))
 
     def _finished(self, ok: bool) -> None:
         self._set_busy(False)
@@ -616,6 +645,11 @@ class SettingsPage(Page):
         self.chunks.valueChanged.connect(lambda v: self._set("chunks", v))
         bd.body.addWidget(Field("Source chunks", _left(self.chunks),
                                 "Lifted code is split into this many files; more = faster rebuilds"))
+        self.jobs = IntEdit(0, 256, s.jobs, "0 = all cores", parent=bd)
+        self.jobs.valueChanged.connect(lambda v: self._set("jobs", v))
+        bd.body.addWidget(Field("Parallel compiles", _left(self.jobs),
+                                "Files compiled at once; 0 = one per CPU thread. Lower it if the "
+                                "build runs out of memory"))
 
         ap = self.add(Card("Appearance", FluentIcon.PALETTE, self.view))
         self.theme = ComboBox(ap)
