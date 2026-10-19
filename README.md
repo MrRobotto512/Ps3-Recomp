@@ -64,27 +64,44 @@ The first run creates a `.venv` and installs the dependencies.
    parallel compiles (lower it if a build runs out of memory),
    theme.
 
-### SPURS games: lifting libsre
+### SPURS games and reference ports
 
-Games that schedule their work with SPURS (inFamous is one) hang on
-ps3recomp's built-in SPURS. They need Sony's real one, `libsre`, lifted to C++
-the same way as the game ([ps3recomp/docs/FIRMWARE_LLE.md](ps3recomp/docs/FIRMWARE_LLE.md)):
+Games that schedule their work with SPURS need their SPU programs lifted. The
+**Lift SPU programs** step (`scripts/lift_spu.py`) does it the way shipping ports
+do: the SPU ELFs embedded in the EBOOT, then any **Raw SPU programs** from the Game
+page (a SPURS policy module that is bare code rather than an ELF), then the WWS job
+modules a Sony-studio job manager runs. For inFamous (US, `BCUS98119`) the raw
+program is its job manager's policy module:
 
-1. With the PS3 firmware installed in RPCS3, decrypt
-   `dev_flash/sys/external/libsre.sprx` (*Utilities › Decrypt PS3 Binaries*).
-   That gives `libsre.prx`.
-2. Pick it in **libsre.prx** on the Game page. Recompile then gets a *Lift
-   libsre* step, which writes `prx/`, and the build includes it.
-3. The log should show `[prx] libsre: 440 lifted functions registered`. Set
-   `PS3_NO_LIBSRE=1` in *Launch environment* to compare with the built-in SPURS.
+    pm_wwsjob=0x69C880:0x2D80@0xA00/0x2BF0
 
-`libsre` is firmware. `prx/` and `*.prx` are git-ignored; keep them that way,
-and don't share a build that contains them.
+(`name=address:size@base/entry`: 0x2D80 bytes at 0x69C880, loaded at local store
+0xA00 and entered at 0x2BF0.)
 
-*Settings › Running the port* also has the toolkit's **diagnostic runner** (a
-watchdog that prints every guest thread when the game stops making progress)
-and **Launch environment**, e.g. `RSX_LIVE_DRAW=1` for the live D3D12
-renderer.
+**Reference port** (Settings › Toolkit) points at a local clone of a finished port
+of the same game, such as [inFAMOUSreborn](https://github.com/whompay/inFAMOUSreborn).
+Studio then uses, in place and without copying anything into this repository:
+
+- its `ps3recomp/` as the toolkit, lifter included (the PPU code must be lifted
+  again with it: **Recompile & build**);
+- its launch settings, from `installer/*.toml`, in *Launch environment*;
+- its `installer/patches`, applied after lifting where they fit this lift
+  (**Apply port patches** lists the rest);
+- its hand-found job-module entry points.
+
+inFAMOUSreborn is made for the European release (`BCES00220`): patches and launch
+settings tied to that release's code addresses will not apply to another one.
+Leave **libsre.prx** empty with it; its toolkit runs SPURS itself.
+
+Sony's own SPURS library can be lifted instead (**libsre.prx** on the Game page,
+`scripts/lift_libsre.py`, see
+[ps3recomp/docs/FIRMWARE_LLE.md](ps3recomp/docs/FIRMWARE_LLE.md)). `libsre` is
+firmware: `prx/` and `*.prx` are git-ignored; keep them that way, and don't share a
+build that contains them.
+
+*Settings › Running the port* has the toolkit's **diagnostic runner** (a watchdog
+that prints every guest thread when the game stops making progress) and **Launch
+environment**, e.g. `RSX_LIVE_DRAW=1` for the live D3D12 renderer.
 
 ### Logs
 
@@ -134,6 +151,7 @@ The CLI writes the same per-step logs and prints where they are. Add
 | `studio/` | PS3 Recomp Studio. `pipeline.py` holds the commands and has no Qt; `ui/` is the interface. |
 | `scripts/recomp.py` | CLI for the same pipeline |
 | `CMakeLists.txt`, `main.cpp`, `stubs.cpp`, `config.toml` | the port project, from ps3recomp's `templates/project`. Per-game fixes go in `stubs.cpp`. |
+| `scripts/lift_spu.py`, `scripts/apply_port_patches.py` | SPU programs and reference-port patches (see above) |
 | `prx_boot.cpp`, `scripts/lift_libsre.py` | lifted-libsre support (see above) |
 | `tests/` | `python -m pytest tests` |
 

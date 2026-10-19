@@ -55,7 +55,8 @@ def test_elf_steps_skip_unwrap(tmp_path):
     eboot = make_game(tmp_path, b"\x7fELF")
     s = p.Settings(work_dir=str(tmp_path / "w"), chunks=8)
     steps = p.recompile_steps(p.Project(eboot=str(eboot)), s)
-    assert [x.key for x in steps] == ["load", "lift"]
+    assert [x.key for x in steps] == ["load", "lift", "spu"]
+    assert [x.key for x in p.recompile_steps(p.Project(eboot=str(eboot), lift_spu=False), s)] == ["load", "lift"]
     lift = steps[1].argv
     assert lift[lift.index("--functions") + 1].endswith("EBOOT.functions.json")
     assert lift[lift.index("--chunks") + 1] == "8"
@@ -67,7 +68,7 @@ def test_self_steps_unwrap_into_out(tmp_path):
     s = p.Settings(work_dir=str(tmp_path / "w"))
     project = p.Project(eboot=str(eboot))
     steps = p.recompile_steps(project, s)
-    assert [x.key for x in steps] == ["unwrap", "load", "lift"]
+    assert [x.key for x in steps] == ["unwrap", "load", "lift", "spu"]
     elf = p.elf_for(project, s)
     assert elf == s.out_dir / "EBOOT.elf"
     assert steps[0].argv[-1] == str(elf) and steps[1].argv[2] == str(elf)
@@ -78,10 +79,8 @@ def test_build_steps_and_exe_path(tmp_path):
     vs = p.Settings(work_dir=str(tmp_path), generator="vs2022-clangcl", build_type="Release")
     configure, build = p.build_steps(project, vs)
     assert "ClangCL" in configure.argv and "-DPORT_NAME=MyGame" in configure.argv
-    assert "-DPORT_SPU_INPUTS=x" in configure.argv
-    project.lift_spu = False
-    assert "-DPORT_SPU_INPUTS=" in p.build_steps(project, vs)[0].argv   # cleared, not stale
-    project.lift_spu = True
+    assert "-DPORT_SPU_INPUTS=" in configure.argv and f"-DSPU_DIR={vs.spu_dir}" in configure.argv
+    assert "-DPORT_AVX2=ON" in configure.argv
     assert not any(a.startswith("-DCMAKE_BUILD_TYPE") for a in configure.argv)
     assert build.argv[build.argv.index("--config") + 1] == "Release"
     assert "/p:UseMultiToolTask=true" in build.argv[build.argv.index("--"):]
@@ -127,30 +126,58 @@ def make_ppu_elf(path: Path, vaddr: int, payload: bytes) -> None:
     path.write_bytes(ehdr + phdr + payload)
 
 
-def test_wrap_raw_spu_program(tmp_path):
-    import subprocess
-    sys.path.insert(0, str(p.ROOT / "ps3recomp" / "tools"))
-    from build_spu_workloads import fnv1a64, text_fp
+def lift_spu_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("lift_spu", p.ROOT / "scripts" / "lift_spu.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_lift_spu_raw_programs_and_job_modules():
+    ls = lift_spu_module()
+    assert ls.parse_raw("pm_wwsjob=0x69C880:0x2D80@0xA00/0x2BF0") == ("pm_wwsjob", 0x69C880, 0x2D80, 0xA00, 0x2BF0)
+    assert ls.parse_raw("0x10100:1024") == (None, 0x10100, 1024, 0xA00, 0xA00)
+
+    code = bytes(range(256)) * 4
+    # A WWS job module: four ila words, entry 0x30, image size, magic at +0x20.
+    jm = struct.pack(">4I", 0x42000000, 0x42000081, 0x42000102, 0x42000183)
+    jm += struct.pack(">5I", 0x30, len(code) + 0x30 + 32, 0, 0, 0xC0DEC0DE) + b"\0" * 12 + code
+    mods = ls.find_jobmods(b"\x11" * 8 + jm + b"\0" * 64)
+    assert len(mods) == 1 and mods[0][0].endswith("_e0030") and len(mods[0][1]) == len(code) + 0x30
+
+
+def test_raw_program_is_cut_from_its_load_segment(tmp_path):
+    ls = lift_spu_module()
     code = bytes(range(256)) * 4
     elf = tmp_path / "EBOOT.elf"
     make_ppu_elf(elf, 0x10000, b"\0" * 0x100 + code + b"\0" * 0x40)
-    out = tmp_path / "raw"
-    subprocess.run([sys.executable, str(p.ROOT / "scripts" / "wrap_spu_raw.py"), str(elf),
-                    "--program", "0x10100:1024", "--out-dir", str(out)], check=True)
-    wrapped = (out / "spu_raw_00010100.elf").read_bytes()
-    # The lift is registered under the fingerprint of the code itself, which is
-    # what the runtime computes from the guest's copy of the policy module.
-    assert text_fp(wrapped) == fnv1a64(code)
+    assert ls.read_vaddr(elf.read_bytes(), 0x10100, 1024) == code
 
-    s = p.Settings(work_dir=str(tmp_path / "w"), generator="ninja")
-    project = p.Project(eboot=str(elf), raw_spu="0x10100:1024")
-    steps = p.build_steps(project, s)
-    assert [x.key for x in steps] == ["rawspu", "configure", "build"]
-    assert steps[0].argv[-2:] == ["--program", "0x10100:1024"]
-    spu = next(a for a in steps[1].argv if a.startswith("-DPORT_SPU_INPUTS="))
-    assert spu.endswith(";" + str(p.raw_spu_dir(s) / "spu_raw_00010100.elf"))
-    project.lift_spu = False
-    assert [x.key for x in p.build_steps(project, s)] == ["configure", "build"]
+
+def test_raw_spu_and_reference_port_steps(tmp_path):
+    eboot = make_game(tmp_path, b"\x7fELF")
+    ref = tmp_path / "inFAMOUSreborn"
+    (ref / "ps3recomp" / "tools").mkdir(parents=True)
+    (ref / "ps3recomp" / "tools" / "ppu_lifter.py").write_text("")   # no --chunks
+    (ref / "installer" / "patches").mkdir(parents=True)
+    (ref / "infamous-recomp" / "spu").mkdir(parents=True)
+    (ref / "infamous-recomp" / "spu" / "jobmods_extra_map.json").write_text("{}")
+    (ref / "installer" / "infamous.toml").write_text('[launch]\nenv = { A = "1", B = "x" }\n')
+    found = p.reference_port_files(str(ref))
+    assert found["toolkit"] == str(ref / "ps3recomp") and found["launch_env"] == "A=1 B=x"
+
+    s = p.Settings(work_dir=str(tmp_path / "w"), toolkit_dir=found["toolkit"], reference_port=str(ref))
+    project = p.Project(eboot=str(eboot), port_name="Infamous",
+                        raw_spu="pm_wwsjob=0x69C880:0x2D80@0xA00/0x2BF0")
+    steps = p.recompile_steps(project, s)
+    assert [x.key for x in steps] == ["load", "lift", "spu", "patches"]
+    assert "--chunks" not in steps[1].argv
+    spu = steps[2].argv
+    assert spu[spu.index("--raw") + 1] == "pm_wwsjob=0x69C880:0x2D80@0xA00/0x2BF0"
+    assert spu[spu.index("--jobmod-prefix") + 1] == "infamous"
+    assert spu[spu.index("--jobmod-extra-map") + 1] == found["jobmod_map"]
+    assert steps[3].argv[2] == found["patches"]
 
 
 def test_launch_sets_vfs_root(tmp_path):
@@ -172,12 +199,13 @@ def test_libsre_step_and_configure(tmp_path):
     assert "-DPORT_PRX_DIR=" in configure and "-DPORT_INSTRUMENTED_RUNNER=ON" in configure
 
     project.libsre = str(tmp_path / "libsre.prx")
-    step = p.recompile_steps(project, s)[-1]
-    assert step.key == "libsre" and step.argv[2] == project.libsre
+    step = next(x for x in p.recompile_steps(project, s) if x.key == "libsre")
+    assert step.argv[2] == project.libsre
     assert step.argv[step.argv.index("--output") + 1] == str(s.prx_dir)
     configure = p.build_steps(project, s)[0].argv
     assert f"-DPORT_PRX_DIR={s.prx_dir}" in configure
-    assert f"-DPORT_SPU_INPUTS={eboot};{project.libsre}" in configure
+    spu = next(x for x in p.recompile_steps(project, s) if x.key == "spu").argv
+    assert spu[spu.index("--libsre-image") + 1] == str(s.prx_dir / "libsre.linked.bin")
 
 
 def test_find_cmake_inside_visual_studio(tmp_path, monkeypatch):

@@ -157,6 +157,16 @@ if(PORT_ENABLE_SPU AND PORT_SPU_INPUTS)
          "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c")
 elseif(PORT_ENABLE_SPU)
     file(GLOB SPU_LIFTED CONFIGURE_DEPENDS "${SPU_DIR}/*/spu_recomp.c")
+    # A toolkit with tools/spu_regcache.py (scripts/lift_spu.py runs it) writes a
+    # register-cached twin, spu_recomp_rc.c, beside each lift; its runtime links
+    # both and serves the twin unless SPU_REGCACHE=0.
+    foreach(_f IN LISTS SPU_LIFTED)
+        get_filename_component(_d "${_f}" DIRECTORY)
+        if(EXISTS "${_d}/spu_recomp_rc.c")
+            list(APPEND SPU_RC "${_d}/spu_recomp_rc.c")
+        endif()
+    endforeach()
+    list(APPEND SPU_LIFTED ${SPU_RC})
     if(SPU_LIFTED)
         list(LENGTH SPU_LIFTED SPU_IMAGE_COUNT)
         message(STATUS "Lifted SPU:      ${SPU_IMAGE_COUNT} image(s)")
@@ -210,13 +220,31 @@ add_executable(${PROJECT_NAME}
 #   -O2                 -- the target-wide -O1 exists for the huge PPU TUs; the
 #                          SPU sources are small and decode-hot, so they get
 #                          full optimization. The last -O on the line wins.
+#   PORT_AVX2           -- see below.
+option(PORT_AVX2 "Build the runtime and lifted SPU code for AVX2/FMA/BMI2 (any x86-64 CPU since 2013-2015)" ON)
+set(PORT_AVX2_FLAGS "")
+if(PORT_AVX2 AND (NOT MSVC OR CMAKE_C_COMPILER_ID MATCHES "Clang"))
+    # Faster everywhere, and required by toolkits whose runtime uses AVX2
+    # intrinsics directly (inFAMOUSreborn's: cellGcmSys.c). Off for a CPU without it.
+    set(PORT_AVX2_FLAGS -mavx2 -mfma -mbmi2)
+    target_compile_options(ps3recomp_runtime PRIVATE ${PORT_AVX2_FLAGS})
+endif()
 if(SPU_SOURCES)
     set_source_files_properties(${SPU_SOURCES} PROPERTIES
         INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
         COMPILE_DEFINITIONS SPU_USE_DISPATCH_MT)
     if(NOT MSVC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
+        # -msse4.1: spu_helpers.h only uses pshufb/blendv for spu_shufb, the hottest SPU op,
+        # when __SSE4_1__ is defined; without it that is a 16-iteration byte loop.
+        set_source_files_properties(${SPU_SOURCES} PROPERTIES
+            COMPILE_OPTIONS "-O2;-msse4.1;${PORT_AVX2_FLAGS}")
     endif()
+    # The job modules' register-cached twins are generated code nobody acts on warnings in.
+    foreach(_f IN LISTS SPU_RC)
+        if(_f MATCHES "/jobmod_[^/]+/spu_recomp_rc\\.c$")
+            set_property(SOURCE "${_f}" APPEND PROPERTY COMPILE_OPTIONS -w)
+        endif()
+    endforeach()
 endif()
 
 # app.rc carries the icon, the version block and the manifest, and needs a

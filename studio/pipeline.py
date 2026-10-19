@@ -112,6 +112,10 @@ class Settings:
     # instead of the minimal main.cpp.
     instrumented_runner: bool = True
     launch_env: str = ""               # extra KEY=VALUE pairs for the port, e.g. RSX_LIVE_DRAW=1
+    avx2: bool = True                  # PORT_AVX2: build for AVX2/FMA/BMI2
+    # A local clone of a finished port of the same game (inFAMOUSreborn). Its
+    # patches and job-module entry map are used in place; see reference_port_files().
+    reference_port: str = ""
 
     @property
     def tools(self) -> Path:
@@ -128,6 +132,10 @@ class Settings:
     @property
     def build_dir(self) -> Path:
         return Path(self.work_dir) / "build"
+
+    @property
+    def spu_dir(self) -> Path:
+        return Path(self.work_dir) / "spu"
 
     @property
     def prx_dir(self) -> Path:
@@ -147,15 +155,16 @@ class Project:
     eboot: str = ""          # EBOOT.BIN or a decrypted EBOOT.elf
     game_root: str = ""      # folder holding PS3_GAME/ (the guest's disc root)
     port_name: str = "PS3Port"
-    # Lift the SPU programs embedded in the executable at configure time, so
-    # SPURS workloads, tasks and jobs have native code to run. Without them a
-    # SPURS game boots and then waits forever on work no SPU ever does.
+    # Lift the game's SPU programs (scripts/lift_spu.py), so SPURS workloads,
+    # tasks and jobs have native code to run. Without them a SPURS game boots
+    # and then waits forever on work no SPU ever does.
     lift_spu: bool = True
     # Your decrypted libsre.prx. When set, Sony's real SPURS library is lifted
     # and run instead of ps3recomp's HLE one (scripts/lift_libsre.py).
     libsre: str = ""
-    # Raw SPU programs to lift, "VADDR:SIZE[@BASE], ..." (scripts/wrap_spu_raw.py):
-    # policy modules that are bare code rather than an ELF. inFamous: 0x69C880:11648.
+    # Raw SPU programs to lift, "[NAME=]VADDR:SIZE[@BASE[/ENTRY]], ...": policy modules
+    # that are bare code rather than an ELF (scripts/lift_spu.py --raw). inFamous (US):
+    # pm_wwsjob=0x69C880:0x2D80@0xA00/0x2BF0.
     raw_spu: str = ""
 
 
@@ -215,6 +224,15 @@ def elf_for(project: Project, s: Settings) -> Path:
     return src
 
 
+def _tool_has_option(tool: Path, option: str) -> bool:
+    """Whether a toolkit script declares an option. Toolkits differ: inFAMOUSreborn's
+    ppu_lifter.py predates --chunks and splits its output by line count instead."""
+    try:
+        return f'"{option}"' in tool.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return True   # missing toolkit: keep the option; the step reports the real problem
+
+
 def recompile_steps(project: Project, s: Settings) -> list[Step]:
     py, tools = s.python, s.tools
     src = Path(project.eboot)
@@ -235,7 +253,7 @@ def recompile_steps(project: Project, s: Settings) -> list[Step]:
         [py, str(tools / "ppu_lifter.py"), str(elf),
          "--functions", str(s.out_dir / f"{elf.stem}.functions.json"),
          "--hle-stubs", str(s.out_dir / f"{elf.stem}.imports.json"),
-         "--chunks", str(s.chunks),
+         *(["--chunks", str(s.chunks)] if _tool_has_option(tools / "ppu_lifter.py", "--chunks") else []),
          "--output", str(s.recompiled_dir)]))
     if project.libsre:
         steps.append(Step(
@@ -243,6 +261,24 @@ def recompile_steps(project: Project, s: Settings) -> list[Step]:
             "Lift Sony's SPURS library so the game runs it instead of the HLE one.",
             [py, str(ROOT / "scripts" / "lift_libsre.py"), project.libsre,
              "--output", str(s.prx_dir), "--toolkit", s.toolkit_dir]))
+    ref = reference_port_files(s.reference_port)
+    if project.lift_spu:
+        argv = [py, str(ROOT / "scripts" / "lift_spu.py"), str(elf),
+                "--out", str(s.spu_dir), "--work", str(s.out_dir / "spu_images"),
+                "--toolkit", s.toolkit_dir, "--jobmod-prefix", project.port_name.lower()]
+        for p in raw_spu_programs(project):
+            argv += ["--raw", p]
+        if project.libsre:   # libsre carries the SPURS kernel's own SPU programs
+            argv += ["--libsre-image", str(s.prx_dir / "libsre.linked.bin")]
+        if ref.get("jobmod_map"):
+            argv += ["--jobmod-extra-map", ref["jobmod_map"]]
+        steps.append(Step("spu", "Lift SPU programs",
+                          "Embedded SPU programs, raw policy modules and WWS job modules.", argv))
+    if ref.get("patches"):
+        steps.append(Step("patches", "Apply port patches",
+                          "Apply the reference port's patches where they fit this lift.",
+                          [py, str(ROOT / "scripts" / "apply_port_patches.py"), ref["patches"],
+                           "--work", s.work_dir]))
     return steps
 
 
@@ -250,33 +286,43 @@ def raw_spu_programs(project: Project) -> list[str]:
     return [p for p in re.split(r"[\s,;]+", project.raw_spu or "") if p]
 
 
-def raw_spu_dir(s: Settings) -> Path:
-    return s.out_dir / "raw_spu"
+def reference_port_files(folder: str) -> dict[str, str]:
+    """What a local clone of a finished port (inFAMOUSreborn's layout) offers this one:
+    toolkit (its ps3recomp/), patches (installer/patches), jobmod_map (the hand-found
+    job-module entry points) and launch_env (installer/*.toml [launch].env, as KEY=VALUE)."""
+    root = Path(folder) if folder else None
+    if not root or not root.is_dir():
+        return {}
+    found = {}
+    if (root / "ps3recomp" / "tools" / "ppu_lifter.py").is_file():
+        found["toolkit"] = str(root / "ps3recomp")
+    if (root / "installer" / "patches").is_dir():
+        found["patches"] = str(root / "installer" / "patches")
+    maps = sorted(root.glob("*/spu/jobmods_extra_map.json"))
+    if maps:
+        found["jobmod_map"] = str(maps[0])
+    for manifest in sorted((root / "installer").glob("*.toml")):
+        try:
+            import tomllib
+            env = tomllib.loads(manifest.read_text(encoding="utf-8")).get("launch", {}).get("env")
+        except (ImportError, OSError, ValueError):
+            continue
+        if isinstance(env, dict) and env:
+            found["launch_env"] = " ".join(f"{k}={v}" for k, v in env.items())
+            break
+    return found
 
 
 def build_steps(project: Project, s: Settings) -> list[Step]:
     cmake = find_cmake(s.cmake) or s.cmake
-    steps = []
-    # libsre carries the SPURS kernel's own SPU programs, which must be lifted
-    # too: without them the real SPURS starts SPU threads that have no code.
-    spu_inputs = [str(elf_for(project, s))] + ([project.libsre] if project.libsre else [])
-    raw = raw_spu_programs(project) if project.lift_spu else []
-    if raw:
-        # Cheap, so it runs before every configure and "Build only" picks it up.
-        argv = [s.python, str(ROOT / "scripts" / "wrap_spu_raw.py"), str(elf_for(project, s)),
-                "--out-dir", str(raw_spu_dir(s)), "--toolkit", s.toolkit_dir]
-        for p in raw:
-            argv += ["--program", p]
-        steps.append(Step("rawspu", "Extract SPU programs",
-                          "Cut the raw SPU policy modules out of the executable.", argv))
-        spu_inputs += [str(raw_spu_dir(s) / f"spu_raw_{int(p.split(':')[0], 0):08X}.elf")
-                       for p in raw]
     configure = [cmake, "-S", str(ROOT), "-B", str(s.build_dir),
                  *GENERATORS[s.generator][1],
                  f"-DPS3RECOMP_DIR={s.toolkit_dir}",
                  f"-DRECOMP_DIR={s.recompiled_dir}",
                  f"-DPORT_NAME={project.port_name}",
-                 f"-DPORT_SPU_INPUTS={';'.join(spu_inputs) if project.lift_spu else ''}",
+                 "-DPORT_SPU_INPUTS=",
+                 f"-DSPU_DIR={s.spu_dir}",
+                 f"-DPORT_AVX2={'ON' if s.avx2 else 'OFF'}",
                  f"-DPORT_PRX_DIR={s.prx_dir if project.libsre else ''}",
                  f"-DPORT_INSTRUMENTED_RUNNER={'ON' if s.instrumented_runner else 'OFF'}"]
     if not s.multi_config:
@@ -290,10 +336,8 @@ def build_steps(project: Project, s: Settings) -> list[Step]:
         build += ["--", "/p:UseMultiToolTask=true", "/p:EnforceProcessCountAcrossBuilds=true"]
         if s.jobs > 0:
             build.append(f"/p:CL_MPCount={s.jobs}")
-    return steps + [
-        Step("configure", "Configure",
-             "Generate the build with CMake" + (" and lift the SPU programs." if project.lift_spu else "."),
-             configure),
+    return [
+        Step("configure", "Configure", "Generate the build with CMake.", configure),
         Step("build", "Build", "Compile the lifted code and the ps3recomp runtime.", build),
     ]
 
