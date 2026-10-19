@@ -238,20 +238,33 @@ set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
 # against the PDB, user32 and gdi32 are what the backend's window and its GDI
 # present are made of, and winmm is timeBeginPeriod. None of the four names
 # anything a POSIX linker can find; the D3D12 backend's own imports come in
-# through the #pragma comment(lib) in libs/video/rsx_d3d12_backend.c.
+# through the #pragma comment(lib) in libs/video/rsx_d3d12_backend.c, except
+# dxguid, which holds the interface IDs it asks DXGI for (IID_IDXGIFactory6).
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         dbghelp
         user32
         gdi32
         winmm
+        dxguid
     )
 endif()
 
 # ---------------------------------------------------------------------------
 # Compiler-specific flags
 # ---------------------------------------------------------------------------
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+# clang-cl reports itself as Clang but takes MSVC's options, and to it -Wall
+# means -Weverything: tens of thousands of warnings that bury the real errors.
+# So branch on the command-line style, not the compiler.
+if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set(PORT_MSVC_STYLE ON)
+elseif(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(PORT_MSVC_STYLE ON)
+else()
+    set(PORT_MSVC_STYLE OFF)
+endif()
+
+if(NOT PORT_MSVC_STYLE)
     target_compile_options(${PROJECT_NAME} PRIVATE
         -Wall -Wextra -Wno-unused-parameter
         -fno-strict-aliasing
@@ -259,17 +272,22 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         # without this, clang exploits overflow UB (e.g. folds "x*x < 0" to false).
         -fwrapv
     )
-elseif(MSVC)
+else()
     target_compile_options(${PROJECT_NAME} PRIVATE
         /W3 /wd4100 /wd4244 /wd4267
         /Zc:__cplusplus         # report correct __cplusplus value
+    )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        # Same reasons as the -fwrapv above; clang-cl takes these two as they are.
+        target_compile_options(${PROJECT_NAME} PRIVATE -fno-strict-aliasing -fwrapv)
+    else()
         # ppu_recomp.h defines PPU_FENCE, the lowering of the guest's
         # sync/lwsync/eieio/isync, and in C that is <stdatomic.h>. The lifter
         # writes C++ by default, but --single-file writes ppu_recomp.c, and a
         # port that took it would not compile without this. The runtime's own
         # build already carries the same flag for the same reason.
-        /experimental:c11atomics
-    )
+        target_compile_options(${PROJECT_NAME} PRIVATE /experimental:c11atomics)
+    endif()
     target_compile_definitions(${PROJECT_NAME} PRIVATE
         _CRT_SECURE_NO_WARNINGS
     )
@@ -282,9 +300,13 @@ endif()
 #     and at this volume they bury the diagnostics that matter.
 #   - no floating-point contraction. arm64 fuses a multiply and an add by
 #     default; a PPC fmadd is spelt as one where the lifter means one.
+#     clang-cl only knows that flag in its /clang: spelling.
 #   - /bigobj on MSVC. A single lifted file routinely passes the 65,536-section
 #     limit of the default object format.
-if(MSVC)
+if(PORT_MSVC_STYLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
+        COMPILE_OPTIONS "/w;/bigobj;/clang:-ffp-contract=off")
+elseif(PORT_MSVC_STYLE)
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
         COMPILE_OPTIONS "/w;/bigobj")
 else()
