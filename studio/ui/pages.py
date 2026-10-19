@@ -18,7 +18,7 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, FluentIcon, IconW
 
 from .. import config, rpcs3
 from ..pipeline import (FMT_ELF, FMT_SELF, GENERATORS, Project, Settings, build_steps,
-                        detect_format, executable_path, find_cmake, find_param_sfo, guess_game_root,
+                        build_progress, detect_format, executable_path, find_cmake, find_param_sfo, guess_game_root,
                         launch_argv, new_log_dir, recompile_steps, sanitize_name, Step, zip_logs)
 from ..runner import StepRunner
 from ..sfo import read_sfo
@@ -300,7 +300,7 @@ class RecompilePage(Page):
         # The running step's row shows its elapsed time, and how long it has
         # been silent, so a slow compile can be told apart from a hung one.
         self._running_row: StepRow | None = None
-        self._step_t0 = self._last_out = 0.0
+        self._step_t0 = self._last_out = self._step_wall0 = 0.0
         self.runner.output.connect(lambda _: setattr(self, "_last_out", time.monotonic()))
         self._ticker = QTimer(self)
         self._ticker.setInterval(1000)
@@ -439,7 +439,8 @@ class RecompilePage(Page):
         if (r := self._row(i)):
             r.set_state("run", "running…")
             r.set_log(self.runner.log_paths[i])
-            self._running_row, self._step_t0 = r, time.monotonic()
+            self._running_row, self._step_t0, self._step_wall0 = r, time.monotonic(), time.time()
+            self._progress_note = ""
             self._last_out = self._step_t0
             self._ticker.start()
 
@@ -448,6 +449,12 @@ class RecompilePage(Page):
             return
         now = time.monotonic()
         note = f"running… {_mmss(now - self._step_t0)}"
+        if self._running_row.step.key == "build":
+            if int(now - self._step_t0) % 5 == 0:   # walking the build tree is not free
+                done, total = build_progress(self.state.project, self.state.settings,
+                                             self._step_wall0 - 2)
+                self._progress_note = f", {done}/{total} lifted files" if total else ""
+            note += self._progress_note
         if now - self._last_out >= 60:
             note += f" (no output for {_mmss(now - self._last_out)})"
         self._running_row.status.setText(note)

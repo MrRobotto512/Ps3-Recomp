@@ -107,7 +107,7 @@ class StepRunner(QObject):
         self._read()
         proc, self._proc = self._proc, None
         if self._log is not None:
-            self._log.close(ok, self._code)
+            self._log.close(ok, self._code, self._cancelled)
             self._log = None
         proc.deleteLater()
         self.stepFinished.emit(self._index, ok, time.monotonic() - self._started)

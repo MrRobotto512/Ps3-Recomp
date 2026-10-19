@@ -246,6 +246,25 @@ def build_steps(project: Project, s: Settings) -> list[Step]:
     ]
 
 
+def build_progress(project: Project, s: Settings, since: float) -> tuple[int, int]:
+    """(lifted files compiled since `since`, lifted files in total), counted from
+    the object files in the build tree. The compiler prints nothing per file, so
+    this is the only sign of how far a long build has got."""
+    lifted = {f.stem for pat in ("*.c", "*.cpp") for f in s.recompiled_dir.glob(pat)}
+    done = set()
+    target_dir = f"{project.port_name}.dir"
+    for pat in ("*.obj", "*.o"):
+        for obj in s.build_dir.rglob(pat):
+            stem = obj.name.split(".")[0]
+            if stem in lifted and target_dir in obj.parts:
+                try:
+                    if obj.stat().st_mtime >= since:
+                        done.add(stem)
+                except OSError:
+                    pass
+    return len(done), len(lifted)
+
+
 def executable_path(project: Project, s: Settings) -> Path:
     exe = project.port_name + (".exe" if os.name == "nt" else "")
     if s.multi_config:
@@ -300,10 +319,11 @@ class StepLog:
             self._f.write(text)
             self._f.flush()
 
-    def close(self, ok: bool, code: int | None = None) -> None:
+    def close(self, ok: bool, code: int | None = None, cancelled: bool = False) -> None:
         if self._f is None:
             return
-        result = "ok" if ok else "FAILED" + (f" (exit code {code})" if code is not None else "")
+        result = ("cancelled" if cancelled else "ok" if ok
+                  else "FAILED" + (f" (exit code {code})" if code is not None else ""))
         self.write(f"\n\n# finished {time.strftime('%Y-%m-%d %H:%M:%S')}, "
                    f"{time.monotonic() - self._started:.1f} s: {result}\n")
         self._f.close()
