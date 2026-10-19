@@ -62,7 +62,7 @@ class StepRunner(QObject):
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONUNBUFFERED", "1")
         env.insert("PYTHONIOENCODING", "utf-8")
-        for k, v in self._env.items():
+        for k, v in {**step.env, **self._env}.items():
             env.insert(k, v)
         proc.setProcessEnvironment(env)
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)

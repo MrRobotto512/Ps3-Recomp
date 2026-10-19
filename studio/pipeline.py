@@ -32,17 +32,20 @@ def _find_root() -> Path:
 
 ROOT = _find_root()
 
-# Generators offered in Settings. On Windows the Visual Studio generator finds
-# the compiler itself, so no "x64 Native Tools" prompt is needed; ClangCL is
-# what the ps3recomp ports are built with.
+# Generators offered in Settings. Ninja + clang-cl is how shipping ps3recomp ports
+# build (ps3recomp's own release Studio, inFAMOUSreborn, ico-recomp); Studio runs it
+# inside the Visual Studio developer environment (vs_env), so no "x64 Native Tools"
+# prompt is needed. The Visual Studio generator finds the compiler itself too.
 GENERATORS = {
+    "ninja-clangcl": ("Ninja + clang-cl (Visual Studio)",
+                      ["-G", "Ninja", "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl"]),
     "vs2022-clangcl": ("Visual Studio 2022 (clang-cl)",
                        ["-G", "Visual Studio 17 2022", "-A", "x64", "-T", "ClangCL"]),
     "vs2022-msvc": ("Visual Studio 2022 (MSVC)",
                     ["-G", "Visual Studio 17 2022", "-A", "x64"]),
     "ninja": ("Ninja (compiler from PATH)", ["-G", "Ninja"]),
 }
-DEFAULT_GENERATOR = "vs2022-clangcl" if os.name == "nt" else "ninja"
+DEFAULT_GENERATOR = "ninja-clangcl" if os.name == "nt" else "ninja"
 
 _IS_WINDOWS = os.name == "nt"
 
@@ -134,7 +137,9 @@ class Settings:
 
     @property
     def build_dir(self) -> Path:
-        return Path(self.work_dir) / "build"
+        # One per generator kind: CMake refuses to reconfigure a build folder with
+        # a different generator, so switching would otherwise fail.
+        return Path(self.work_dir) / ("build" if self.multi_config else f"build-{self.generator}")
 
     @property
     def spu_dir(self) -> Path:
@@ -178,6 +183,59 @@ class Step:
     description: str
     argv: list[str]
     cwd: str | None = None
+    env: dict[str, str] = field(default_factory=dict)   # on top of the inherited environment
+
+
+def find_vs() -> Path | None:
+    """The newest Visual Studio with the C++ tools and its Clang component."""
+    vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / \
+        "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if not vswhere.is_file():
+        return None
+    import subprocess
+    try:
+        out = subprocess.run([str(vswhere), "-latest", "-products", "*", "-requires",
+                              "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                              "Microsoft.VisualStudio.Component.VC.Llvm.Clang",
+                              "-property", "installationPath"],
+                             capture_output=True, text=True, timeout=30).stdout.split("\n")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    paths = [Path(line.strip()) for line in out if line.strip()]
+    return paths[0] if paths else None
+
+
+_VS_ENV: dict[str, dict[str, str]] = {}
+
+
+def vs_env() -> dict[str, str]:
+    """The environment vcvars64.bat sets up, plus Visual Studio's bundled clang-cl on
+    PATH -- what Ninja + clang-cl builds in. After ico-recomp's pipeline/ico_pipeline.py
+    (MIT, (c) 2026 ico-recomp contributors). Empty off Windows or without Visual Studio."""
+    if not _IS_WINDOWS:
+        return {}
+    vs = find_vs()
+    if vs is None:
+        return {}
+    key = str(vs)
+    if key not in _VS_ENV:
+        import subprocess
+        vcvars = vs / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+        env: dict[str, str] = {}
+        if vcvars.is_file():
+            out = subprocess.run(f'cmd /s /c ""{vcvars}" >nul && set"', capture_output=True,
+                                 text=True, shell=True).stdout
+            for line in out.splitlines():
+                k, sep, v = line.partition("=")
+                if sep:
+                    env[k] = v
+        if "VCToolsInstallDir" in env:
+            path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
+            env[path_key] = f"{vs / 'VC' / 'Tools' / 'Llvm' / 'x64' / 'bin'};{env[path_key]}"
+        else:
+            env = {}
+        _VS_ENV[key] = env
+    return _VS_ENV[key]
 
 
 def detect_format(path: str | os.PathLike) -> str:
@@ -340,9 +398,10 @@ def build_steps(project: Project, s: Settings) -> list[Step]:
         build += ["--", "/p:UseMultiToolTask=true", "/p:EnforceProcessCountAcrossBuilds=true"]
         if s.jobs > 0:
             build.append(f"/p:CL_MPCount={s.jobs}")
+    env = vs_env() if s.generator == "ninja-clangcl" else {}
     return [
-        Step("configure", "Configure", "Generate the build with CMake.", configure),
-        Step("build", "Build", "Compile the lifted code and the ps3recomp runtime.", build),
+        Step("configure", "Configure", "Generate the build with CMake.", configure, env=env),
+        Step("build", "Build", "Compile the lifted code and the ps3recomp runtime.", build, env=env),
     ]
 
 

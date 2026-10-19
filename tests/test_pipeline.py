@@ -94,7 +94,20 @@ def test_build_steps_and_exe_path(tmp_path):
     configure, build = p.build_steps(project, ninja)
     assert "-DCMAKE_BUILD_TYPE=Debug" in configure.argv and "--config" not in build.argv
     assert "--" not in build.argv
-    assert p.executable_path(project, ninja).parent == tmp_path / "build"
+    assert p.executable_path(project, ninja).parent == tmp_path / "build-ninja"
+
+
+def test_ninja_clangcl_builds_in_the_visual_studio_environment(tmp_path, monkeypatch):
+    monkeypatch.setattr(p, "vs_env", lambda: {"PATH": r"C:\VS\Llvm\x64\bin;C:\x", "INCLUDE": "inc"})
+    project = p.Project(eboot="x", port_name="G")
+    s = p.Settings(work_dir=str(tmp_path), generator="ninja-clangcl", build_type="Release")
+    configure, build = p.build_steps(project, s)
+    assert configure.argv[configure.argv.index("-G") + 1] == "Ninja"
+    assert "-DCMAKE_CXX_COMPILER=clang-cl" in configure.argv and "-DCMAKE_BUILD_TYPE=Release" in configure.argv
+    assert configure.env["INCLUDE"] == "inc" and build.env == configure.env
+    assert s.build_dir == tmp_path / "build-ninja-clangcl"   # never the Visual Studio generator's folder
+    assert p.executable_path(project, s) .parent == s.build_dir
+    assert p.build_steps(project, p.Settings(work_dir=str(tmp_path), generator="ninja"))[0].env == {}
 
 
 def test_build_progress_counts_fresh_lifted_objects(tmp_path):

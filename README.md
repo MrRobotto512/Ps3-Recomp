@@ -60,7 +60,9 @@ The first run creates a `.venv` and installs the dependencies.
    Configure; games that use SPURS hang without it.
 3. **Recompile page:** *Recompile & build*, then *Launch*. All tool output
    streams into the log.
-4. **Settings:** compiler (clang-cl or MSVC), Release/RelWithDebInfo/Debug,
+4. **Settings:** compiler (default *Ninja + clang-cl*, the way shipping ps3recomp
+   ports build, run inside Visual Studio's developer environment; or the Visual
+   Studio generator with clang-cl or MSVC), Release/RelWithDebInfo/Debug,
    parallel compiles (lower it if a build runs out of memory),
    theme.
 
@@ -164,6 +166,11 @@ The CLI writes the same per-step logs and prints where they are. Add
 Update the toolkit with `git submodule update --remote ps3recomp`.
 
 ## Licences
+
+The Visual Studio environment setup for Ninja builds (`vs_env` in
+`studio/pipeline.py`) follows [ico-recomp](https://github.com/feanor-noldorin/ico-recomp)'s
+pipeline (MIT, © 2026 ico-recomp contributors).
+
 
 ps3recomp is MIT. The app's UI uses
 [PySide6-Fluent-Widgets](https://github.com/zhiyiYo/PyQt-Fluent-Widgets), which
