@@ -79,13 +79,40 @@ def test_build_steps_and_exe_path(tmp_path):
     configure, build = p.build_steps(project, vs)
     assert "ClangCL" in configure.argv and "-DPORT_NAME=MyGame" in configure.argv
     assert not any(a.startswith("-DCMAKE_BUILD_TYPE") for a in configure.argv)
-    assert build.argv[-2:] == ["--config", "Release"]
+    assert build.argv[build.argv.index("--config") + 1] == "Release"
+    assert "/p:UseMultiToolTask=true" in build.argv[build.argv.index("--"):]
+    assert not any(a.startswith("/p:CL_MPCount") for a in build.argv)
+    vs.jobs = 6
+    build = p.build_steps(project, vs)[1].argv
+    assert build[build.index("--parallel") + 1] == "6" and "/p:CL_MPCount=6" in build
     assert p.executable_path(project, vs).parent == tmp_path / "build" / "Release"
 
     ninja = p.Settings(work_dir=str(tmp_path), generator="ninja", build_type="Debug")
     configure, build = p.build_steps(project, ninja)
     assert "-DCMAKE_BUILD_TYPE=Debug" in configure.argv and "--config" not in build.argv
+    assert "--" not in build.argv
     assert p.executable_path(project, ninja).parent == tmp_path / "build"
+
+
+def test_build_progress_counts_fresh_lifted_objects(tmp_path):
+    import os
+    s = p.Settings(work_dir=str(tmp_path), generator="vs2022-clangcl")
+    project = p.Project(eboot="x", port_name="MyGame")
+    s.recompiled_dir.mkdir()
+    for name in ("ppu_recomp_000.cpp", "ppu_recomp_001.cpp", "ppu_recomp_002.cpp"):
+        (s.recompiled_dir / name).write_text("")
+    objs = s.build_dir / "MyGame.dir" / "Release"
+    objs.mkdir(parents=True)
+    (objs / "ppu_recomp_000.obj").write_text("")
+    (objs / "ppu_recomp_001.obj").write_text("")
+    (objs / "main.obj").write_text("")                     # not a lifted file
+    stale = objs / "ppu_recomp_002.obj"
+    stale.write_text("")
+    os.utime(stale, (1000, 1000))                          # from an earlier build
+    other = s.build_dir / "ps3recomp_sdk" / "ppu_recomp_002.obj"   # another target
+    other.parent.mkdir(parents=True)
+    other.write_text("")
+    assert p.build_progress(project, s, since=2000) == (2, 3)
 
 
 def test_launch_sets_vfs_root(tmp_path):
@@ -133,5 +160,8 @@ def test_step_logs_and_zip(tmp_path):
     text = log.path.read_text(encoding="utf-8")
     assert '# command  python "lift me.py"' in text and "lifting..." in text
     assert "FAILED (exit code 3)" in text
+    step2 = p.StepLog(second / "cancelled.log", step)
+    step2.close(False, 62097, cancelled=True)
+    assert ": cancelled" in step2.path.read_text(encoding="utf-8")
     with zipfile.ZipFile(p.zip_logs(first, tmp_path / "logs.zip")) as z:
         assert z.namelist() == [f"{first.name}/02-lift.log"]
