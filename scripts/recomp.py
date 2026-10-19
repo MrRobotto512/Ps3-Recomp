@@ -35,7 +35,7 @@ from studio.pipeline import (FMT_SELF, FMT_UNKNOWN, GENERATORS, Project, Setting
 def run_logged(step, log_path: Path) -> int:
     """Run a step, echoing its output to the console and to its log file."""
     log = StepLog(log_path, step)
-    env = dict(os.environ, **step.env, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+    env = dict(os.environ, **step.resolved_env(), PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
     try:
         proc = subprocess.Popen(step.argv, cwd=step.cwd, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

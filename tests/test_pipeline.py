@@ -104,10 +104,10 @@ def test_ninja_clangcl_builds_in_the_visual_studio_environment(tmp_path, monkeyp
     configure, build = p.build_steps(project, s)
     assert configure.argv[configure.argv.index("-G") + 1] == "Ninja"
     assert "-DCMAKE_CXX_COMPILER=clang-cl" in configure.argv and "-DCMAKE_BUILD_TYPE=Release" in configure.argv
-    assert configure.env["INCLUDE"] == "inc" and build.env == configure.env
+    assert configure.resolved_env()["INCLUDE"] == "inc" and build.resolved_env() == configure.resolved_env()
     assert s.build_dir == tmp_path / "build-ninja-clangcl"   # never the Visual Studio generator's folder
     assert p.executable_path(project, s) .parent == s.build_dir
-    assert p.build_steps(project, p.Settings(work_dir=str(tmp_path), generator="ninja"))[0].env == {}
+    assert p.build_steps(project, p.Settings(work_dir=str(tmp_path), generator="ninja"))[0].resolved_env() == {}
 
 
 def test_build_progress_counts_fresh_lifted_objects(tmp_path):

@@ -14,6 +14,7 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 
 
@@ -183,7 +184,12 @@ class Step:
     description: str
     argv: list[str]
     cwd: str | None = None
-    env: dict[str, str] = field(default_factory=dict)   # on top of the inherited environment
+    # On top of the inherited environment. May be a function returning the dict, so
+    # costly setup (vs_env) runs only when the step does, not whenever steps are listed.
+    env: dict[str, str] | Callable[[], dict[str, str]] = field(default_factory=dict)
+
+    def resolved_env(self) -> dict[str, str]:
+        return self.env() if callable(self.env) else self.env
 
 
 def find_vs() -> Path | None:
@@ -222,13 +228,16 @@ def vs_env() -> dict[str, str]:
         import subprocess
         vcvars = vs / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
         env: dict[str, str] = {}
-        if vcvars.is_file():
+        try:   # any failure here means "no developer environment", never a crash
             out = subprocess.run(f'cmd /s /c ""{vcvars}" >nul && set"', capture_output=True,
-                                 text=True, shell=True).stdout
-            for line in out.splitlines():
+                                 shell=True, timeout=120, stdin=subprocess.DEVNULL,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+            for line in out.decode("mbcs" if _IS_WINDOWS else "utf-8", errors="replace").splitlines():
                 k, sep, v = line.partition("=")
-                if sep:
+                if sep and k:
                     env[k] = v
+        except (OSError, subprocess.SubprocessError, LookupError):
+            env = {}
         if "VCToolsInstallDir" in env:
             path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
             env[path_key] = f"{vs / 'VC' / 'Tools' / 'Llvm' / 'x64' / 'bin'};{env[path_key]}"
@@ -398,7 +407,7 @@ def build_steps(project: Project, s: Settings) -> list[Step]:
         build += ["--", "/p:UseMultiToolTask=true", "/p:EnforceProcessCountAcrossBuilds=true"]
         if s.jobs > 0:
             build.append(f"/p:CL_MPCount={s.jobs}")
-    env = vs_env() if s.generator == "ninja-clangcl" else {}
+    env = vs_env if s.generator == "ninja-clangcl" else {}   # captured when the step runs
     return [
         Step("configure", "Configure", "Generate the build with CMake.", configure, env=env),
         Step("build", "Build", "Compile the lifted code and the ps3recomp runtime.", build, env=env),
