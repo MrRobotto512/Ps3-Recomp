@@ -71,16 +71,18 @@ def main():
         m = re.search(r"TOC (0x[0-9A-Fa-f]+)", summary)
         if not m:
             sys.exit("lift_prx.py did not report the module's TOC")
-        # lift_prx.py lists each import by the address of its .sceStub trampoline,
-        # which is what the lifter's --hle-stubs wants.
-        imports = json.loads((tmp / "libsre_imports.json").read_text())
+        # lift_prx.py names its outputs after the input file, whatever it is called.
+        stem = args.prx.stem
+        # It lists each import by the address of its .sceStub trampoline, which
+        # is what the lifter's --hle-stubs wants.
+        imports = json.loads((tmp / f"{stem}_imports.json").read_text())
         stubs = [{"library": lib, "nid": nid, "stub": stub}
                  for lib, entries in imports.items() for nid, stub in entries.items()]
         (tmp / "hle_stubs.json").write_text(json.dumps(stubs, indent=1))
 
         run([py, tools / "ppu_lifter.py", out / "libsre.linked.bin", "--raw",
              "--base", hex(BASE), "--toc", m.group(1), "--symbol-prefix", "libsre_",
-             "--functions", tmp / "libsre_functions.json", "--hle-stubs", tmp / "hle_stubs.json",
+             "--functions", tmp / f"{stem}_functions.json", "--hle-stubs", tmp / "hle_stubs.json",
              "--header-name", "libsre_recomp.h", "--source-name", "libsre_recomp.cpp",
              "--chunks", "4", "--output", out])
 
