@@ -89,6 +89,12 @@ Studio then uses, in place and without copying anything into this repository:
   (**Apply port patches** lists the rest);
 - its hand-found job-module entry points.
 
+With an **Address map** (Settings › Toolkit) its PPU patches are placed too: each
+hunk's addresses are translated through the map and it goes beside the labels it
+uses, in whichever chunk defines them. The map is `EU US` pairs or
+`EU_START EU_END DELTA` ranges, one per line, or JSON (see
+`scripts/apply_port_patches.py`).
+
 inFAMOUSreborn is made for the European release (`BCES00220`): patches and launch
 settings tied to that release's code addresses will not apply to another one.
 Leave **libsre.prx** empty with it; its toolkit runs SPURS itself.

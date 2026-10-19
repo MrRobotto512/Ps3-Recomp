@@ -76,6 +76,9 @@ def main():
     ap.add_argument("--reference-port", default="", metavar="DIR",
                     help="a finished port of the game (e.g. an inFAMOUSreborn clone): use its "
                          "toolkit, patches and job-module entry points")
+    ap.add_argument("--address-map", default="", metavar="FILE",
+                    help="the reference port's PPU addresses -> this game's (see "
+                         "scripts/apply_port_patches.py)")
     ap.add_argument("--no-spu", action="store_true",
                     help="don't lift the SPU programs embedded in the executable")
     ap.add_argument("--generator", choices=list(GENERATORS), default=s.generator)
@@ -92,6 +95,8 @@ def main():
     if args.reference_port:
         s.reference_port = str(Path(args.reference_port).resolve())
         s.toolkit_dir = reference_port_files(s.reference_port).get("toolkit", s.toolkit_dir)
+    if args.address_map:
+        s.address_map = str(Path(args.address_map).resolve())
     if not (s.tools / "ppu_lifter.py").exists():
         sys.exit("ps3recomp submodule is missing: run `git submodule update --init`")
     if not args.input.is_file():

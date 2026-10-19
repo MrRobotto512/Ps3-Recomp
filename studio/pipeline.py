@@ -116,6 +116,9 @@ class Settings:
     # A local clone of a finished port of the same game (inFAMOUSreborn). Its
     # patches and job-module entry map are used in place; see reference_port_files().
     reference_port: str = ""
+    # Its release's PPU addresses -> this game's (e.g. EU -> US), so its PPU patches
+    # can be placed here too (scripts/apply_port_patches.py --address-map).
+    address_map: str = ""
 
     @property
     def tools(self) -> Path:
@@ -278,7 +281,8 @@ def recompile_steps(project: Project, s: Settings) -> list[Step]:
         steps.append(Step("patches", "Apply port patches",
                           "Apply the reference port's patches where they fit this lift.",
                           [py, str(ROOT / "scripts" / "apply_port_patches.py"), ref["patches"],
-                           "--work", s.work_dir]))
+                           "--work", s.work_dir,
+                           *(["--address-map", s.address_map] if s.address_map else [])]))
     return steps
 
 

@@ -677,6 +677,9 @@ class SettingsPage(Page):
         tk.body.addWidget(Field("Reference port", self.ref,
                                 "A finished port of this game. Its toolkit, launch settings, patches "
                                 "and job-module entry points are used in place"))
+        self.amap = self._path(tk, "Address map", "file", s.address_map, "address_map",
+                               "Its release's PPU addresses to this one's (e.g. EU to US), so its "
+                               "PPU patches can be placed here too")
 
         bd = self.add(Card("Build", FluentIcon.DEVELOPER_TOOLS, self.view))
         self.gen = ComboBox(bd)

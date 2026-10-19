@@ -177,7 +177,53 @@ def test_raw_spu_and_reference_port_steps(tmp_path):
     assert spu[spu.index("--raw") + 1] == "pm_wwsjob=0x69C880:0x2D80@0xA00/0x2BF0"
     assert spu[spu.index("--jobmod-prefix") + 1] == "infamous"
     assert spu[spu.index("--jobmod-extra-map") + 1] == found["jobmod_map"]
-    assert steps[3].argv[2] == found["patches"]
+    assert steps[3].argv[2] == found["patches"] and "--address-map" not in steps[3].argv
+    s.address_map = str(tmp_path / "eu_to_us.txt")
+    patches = p.recompile_steps(project, s)[3].argv
+    assert patches[patches.index("--address-map") + 1] == s.address_map
+
+
+def apply_patches_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("app", p.ROOT / "scripts" / "apply_port_patches.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_address_map_formats_and_translation(tmp_path):
+    app = apply_patches_module()
+    pairs = tmp_path / "pairs.txt"
+    pairs.write_text("# EU US\n0x00010000 0x00010000\n0x00200000 0x00200010\n0x00718748 0x00718760\n")
+    ranges = tmp_path / "ranges.json"
+    ranges.write_text('{"ranges": [["0x10000", "0x1FFFFF", 0], ["0x200000", "0x718748", 16]]}')
+    for f in (pairs, ranges):
+        m = app.AddressMap.load(f)
+        assert m(0x100000) == 0x100000 and m(0x300000) == 0x300010
+        line = "ctx->lr = 0x0039D98C; func_00353A80(ctx); goto loc_000CA540; x = 0x40000010;"
+        assert m.translate(line) == ("ctx->lr = 0x0039D99C; func_00353A90(ctx); goto loc_000CA540; "
+                                     "x = 0x40000010;")   # outside the map: left alone
+
+
+def test_patch_hunks_follow_labels_and_skip_decoys(tmp_path):
+    app = apply_patches_module()
+    patches = tmp_path / "patches" / "port" / "recompiled"
+    patches.mkdir(parents=True)
+    (patches / "ppu_recomp_000.cpp.patch").write_text(
+        "--- a/port/recompiled/ppu_recomp_000.cpp\n+++ b/port/recompiled/ppu_recomp_000.cpp\n"
+        "@@ -10,3 +10,3 @@\n         x = 1;\n-        memcpy(a);\n+        stvx(a);\n         goto loc_00020000;\n")
+    work = tmp_path / "work" / "recompiled"
+    work.mkdir(parents=True)
+    block = ["        x = 1;", "        memcpy(a);", "        goto loc_00020100;"]
+    (work / "ppu_recomp_003.cpp").write_text("\n".join(          # chunks need not split alike
+        block + ["        /* elsewhere */"] * 50 + ["loc_00020100:", "        y = 2;"] + block) + "\n")
+    (tmp_path / "map.txt").write_text("0x00010000 0x00010100\n0x00718748 0x00718848\n")
+    import subprocess
+    subprocess.run([sys.executable, str(p.ROOT / "scripts" / "apply_port_patches.py"), str(tmp_path / "patches"),
+                    "--work", str(tmp_path / "work"), "--address-map", str(tmp_path / "map.txt")], check=True)
+    lines = (work / "ppu_recomp_003.cpp").read_text().split("\n")
+    assert lines[1] == "        memcpy(a);"            # the decoy far from loc_00020100 is untouched
+    assert lines[56] == "        stvx(a);"              # the copy beside its label is patched
 
 
 def test_launch_sets_vfs_root(tmp_path):
