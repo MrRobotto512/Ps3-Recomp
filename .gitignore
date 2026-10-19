@@ -13,6 +13,7 @@ prx/
 # Pipeline output (regenerate with the app or scripts/recomp.py)
 out/
 recompiled/
+spu/
 build/
 build-*/
 logs/

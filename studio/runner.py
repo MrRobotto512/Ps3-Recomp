@@ -90,8 +90,12 @@ class StepRunner(QObject):
 
     def _error(self, err) -> None:
         if err == QProcess.ProcessError.FailedToStart and self._proc is not None:
-            self._emit(f"[studio] could not start {self._steps[self._index].argv[0]!r}: "
-                       f"{self._proc.errorString()}\n")
+            reason = self._proc.errorString()
+            self._emit(f"[studio] could not start {self._steps[self._index].argv[0]!r}: {reason}\n")
+            if "Application Control" in reason:
+                self._emit("[studio] Windows blocked this program, not the port: usually Smart App "
+                           "Control, which can refuse a freshly built unsigned .exe. Try again, and "
+                           "see Windows Security > Protection history for what blocked it.\n")
             self._finish_step(False)
 
     def _done(self, code: int, status) -> None:
