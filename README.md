@@ -64,6 +64,28 @@ The first run creates a `.venv` and installs the dependencies.
    parallel compiles (lower it if a build runs out of memory),
    theme.
 
+### SPURS games: lifting libsre
+
+Games that schedule their work with SPURS (inFamous is one) hang on
+ps3recomp's built-in SPURS. They need Sony's real one, `libsre`, lifted to C++
+the same way as the game ([ps3recomp/docs/FIRMWARE_LLE.md](ps3recomp/docs/FIRMWARE_LLE.md)):
+
+1. With the PS3 firmware installed in RPCS3, decrypt
+   `dev_flash/sys/external/libsre.sprx` (*Utilities › Decrypt PS3 Binaries*).
+   That gives `libsre.prx`.
+2. Pick it in **libsre.prx** on the Game page. Recompile then gets a *Lift
+   libsre* step, which writes `prx/`, and the build includes it.
+3. The log should show `[prx] libsre: 440 lifted functions registered`. Set
+   `PS3_NO_LIBSRE=1` in *Launch environment* to compare with the built-in SPURS.
+
+`libsre` is firmware. `prx/` and `*.prx` are git-ignored; keep them that way,
+and don't share a build that contains them.
+
+*Settings › Running the port* also has the toolkit's **diagnostic runner** (a
+watchdog that prints every guest thread when the game stops making progress)
+and **Launch environment**, e.g. `RSX_LIVE_DRAW=1` for the live D3D12
+renderer.
+
 ### Logs
 
 Every run saves each step's output to its own file, with the command, start
@@ -112,6 +134,7 @@ The CLI writes the same per-step logs and prints where they are. Add
 | `studio/` | PS3 Recomp Studio. `pipeline.py` holds the commands and has no Qt; `ui/` is the interface. |
 | `scripts/recomp.py` | CLI for the same pipeline |
 | `CMakeLists.txt`, `main.cpp`, `stubs.cpp`, `config.toml` | the port project, from ps3recomp's `templates/project`. Per-game fixes go in `stubs.cpp`. |
+| `prx_boot.cpp`, `scripts/lift_libsre.py` | lifted-libsre support (see above) |
 | `tests/` | `python -m pytest tests` |
 
 Update the toolkit with `git submodule update --remote ps3recomp`.

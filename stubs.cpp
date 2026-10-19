@@ -26,9 +26,11 @@
  * answers those modules instead.
  * -----------------------------------------------------------------------*/
 
+#ifndef PORT_PRX_LOADER   /* prx_boot.cpp has the real one when libsre is lifted */
 extern "C" void ps3_load_prx_modules(void)
 {
 }
+#endif
 
 /* ---------------------------------------------------------------------------
  * Example: Override a specific NID

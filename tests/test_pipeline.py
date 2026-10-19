@@ -124,6 +124,24 @@ def test_launch_sets_vfs_root(tmp_path):
     argv, env = p.launch_argv(project, p.Settings(work_dir=str(tmp_path), generator="ninja"))
     assert argv[1] == str(tmp_path / "EBOOT.elf")
     assert env == {"PS3_VFS_ROOT": str(tmp_path)}
+    s = p.Settings(work_dir=str(tmp_path), generator="ninja", launch_env=" RSX_LIVE_DRAW=10;X=a=b junk")
+    assert p.launch_argv(project, s)[1] == {"RSX_LIVE_DRAW": "10", "X": "a=b",
+                                            "PS3_VFS_ROOT": str(tmp_path)}
+
+
+def test_libsre_step_and_configure(tmp_path):
+    eboot = make_game(tmp_path, b"\x7fELF")
+    s = p.Settings(work_dir=str(tmp_path / "w"), generator="ninja")
+    project = p.Project(eboot=str(eboot))
+    assert "libsre" not in [x.key for x in p.recompile_steps(project, s)]
+    configure = p.build_steps(project, s)[0].argv
+    assert "-DPORT_PRX_DIR=" in configure and "-DPORT_INSTRUMENTED_RUNNER=ON" in configure
+
+    project.libsre = str(tmp_path / "libsre.prx")
+    step = p.recompile_steps(project, s)[-1]
+    assert step.key == "libsre" and step.argv[2] == project.libsre
+    assert step.argv[step.argv.index("--output") + 1] == str(s.prx_dir)
+    assert f"-DPORT_PRX_DIR={s.prx_dir}" in p.build_steps(project, s)[0].argv
 
 
 def test_find_cmake_inside_visual_studio(tmp_path, monkeypatch):
