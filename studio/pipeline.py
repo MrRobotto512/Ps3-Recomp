@@ -154,6 +154,9 @@ class Project:
     # Your decrypted libsre.prx. When set, Sony's real SPURS library is lifted
     # and run instead of ps3recomp's HLE one (scripts/lift_libsre.py).
     libsre: str = ""
+    # Raw SPU programs to lift, "VADDR:SIZE[@BASE], ..." (scripts/wrap_spu_raw.py):
+    # policy modules that are bare code rather than an ELF. inFamous: 0x69C880:11648.
+    raw_spu: str = ""
 
 
 @dataclass
@@ -243,11 +246,31 @@ def recompile_steps(project: Project, s: Settings) -> list[Step]:
     return steps
 
 
+def raw_spu_programs(project: Project) -> list[str]:
+    return [p for p in re.split(r"[\s,;]+", project.raw_spu or "") if p]
+
+
+def raw_spu_dir(s: Settings) -> Path:
+    return s.out_dir / "raw_spu"
+
+
 def build_steps(project: Project, s: Settings) -> list[Step]:
     cmake = find_cmake(s.cmake) or s.cmake
+    steps = []
     # libsre carries the SPURS kernel's own SPU programs, which must be lifted
     # too: without them the real SPURS starts SPU threads that have no code.
     spu_inputs = [str(elf_for(project, s))] + ([project.libsre] if project.libsre else [])
+    raw = raw_spu_programs(project) if project.lift_spu else []
+    if raw:
+        # Cheap, so it runs before every configure and "Build only" picks it up.
+        argv = [s.python, str(ROOT / "scripts" / "wrap_spu_raw.py"), str(elf_for(project, s)),
+                "--out-dir", str(raw_spu_dir(s)), "--toolkit", s.toolkit_dir]
+        for p in raw:
+            argv += ["--program", p]
+        steps.append(Step("rawspu", "Extract SPU programs",
+                          "Cut the raw SPU policy modules out of the executable.", argv))
+        spu_inputs += [str(raw_spu_dir(s) / f"spu_raw_{int(p.split(':')[0], 0):08X}.elf")
+                       for p in raw]
     configure = [cmake, "-S", str(ROOT), "-B", str(s.build_dir),
                  *GENERATORS[s.generator][1],
                  f"-DPS3RECOMP_DIR={s.toolkit_dir}",
@@ -267,7 +290,7 @@ def build_steps(project: Project, s: Settings) -> list[Step]:
         build += ["--", "/p:UseMultiToolTask=true", "/p:EnforceProcessCountAcrossBuilds=true"]
         if s.jobs > 0:
             build.append(f"/p:CL_MPCount={s.jobs}")
-    return [
+    return steps + [
         Step("configure", "Configure",
              "Generate the build with CMake" + (" and lift the SPU programs." if project.lift_spu else "."),
              configure),

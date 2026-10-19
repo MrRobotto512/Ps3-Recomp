@@ -161,6 +161,12 @@ class GamePage(Page):
         info.body.addWidget(Field("libsre.prx", self.libsre,
                                   "Runs Sony's SPURS instead of the HLE one; inFamous needs it. "
                                   "Decrypt dev_flash/sys/external/libsre.sprx with RPCS3"))
+        self.raw_spu = LineEdit(info)
+        self.raw_spu.setPlaceholderText("e.g. 0x69C880:11648")
+        self.raw_spu.editingFinished.connect(self._raw_spu_changed)
+        info.body.addWidget(Field("Raw SPU programs", self.raw_spu,
+                                  "Policy modules that are bare code, as address:size. From the "
+                                  "log's \u201cPM NOT LIFTED\u201d / AddWorkload pm= line"))
         self.spu = CheckBox("Lift the SPU programs in the executable", info)
         self.spu.stateChanged.connect(self._spu_changed)
         info.body.addWidget(Field("SPU", self.spu,
@@ -176,6 +182,7 @@ class GamePage(Page):
         self.root.setText(p.game_root)
         self.name.setText(p.port_name)
         self.libsre.setText(p.libsre)
+        self.raw_spu.setText(p.raw_spu)
         self.spu.blockSignals(True)
         self.spu.setChecked(p.lift_spu)
         self.spu.blockSignals(False)
@@ -242,6 +249,12 @@ class GamePage(Page):
     def _root_changed(self, path: str) -> None:
         self.state.project.game_root = path
         self.state.touch()
+
+    def _raw_spu_changed(self) -> None:
+        text = self.raw_spu.text().strip()
+        if text != self.state.project.raw_spu:
+            self.state.project.raw_spu = text
+            self.state.touch()
 
     def _libsre_changed(self, path: str) -> None:
         self.state.project.libsre = path
