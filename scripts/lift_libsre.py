@@ -12,7 +12,8 @@ real module. This script runs that pipeline with the toolkit's own tools:
   2. lift_prx.py       -> function seeds, and libsre's own import stubs
   3. ppu_lifter.py     -> libsre_recomp*.cpp, its functions as C++ (libsre_ prefix);
                           the import stubs become ps3_hle_call(nid), so libsre's
-                          calls into sysPrxForUser reach the HLE
+                          calls into sysPrxForUser reach the HLE, and --code-end
+                          keeps the data segment from being lifted as code
   4. prx_exports.py    -> libsre_exports.c, NID -> address for prx_resolve_export
 
 prx_boot.cpp at the repository root loads the result at startup. The input is
@@ -24,6 +25,7 @@ of git (prx/ is ignored) and do not distribute builds that contain it.
 import argparse
 import json
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -31,6 +33,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BASE = 0x30000000      # must match kLibsreBase in prx_boot.cpp
+
+
+def code_end(prx: bytes) -> int:
+    """BASE + the end of the PRX's executable PT_LOAD. Past it is the data segment
+    (import slots, TOC, OPDs), which the lifter must not take for code."""
+    phoff = struct.unpack_from(">Q", prx, 0x20)[0]
+    phentsize, phnum = struct.unpack_from(">HH", prx, 0x36)
+    for i in range(phnum):
+        p_type, p_flags, _, p_vaddr, _, p_filesz = struct.unpack_from(">IIQQQQ", prx, phoff + i * phentsize)
+        if p_type == 1 and p_flags & 1:   # PT_LOAD, PF_X
+            return BASE + p_vaddr + p_filesz
+    sys.exit("the PRX has no executable segment")
 
 
 def run(argv: list) -> str:
@@ -52,7 +66,7 @@ def main():
     args = ap.parse_args()
 
     tools = args.toolkit / "tools"
-    data = args.prx.read_bytes()[:0x40]
+    data = args.prx.read_bytes()
     if data[:4] != b"\x7fELF":
         sys.exit(f"{args.prx} is not a decrypted PRX. Decrypt libsre.sprx with RPCS3 first "
                  "(Utilities > Decrypt PS3 Binaries).")
@@ -83,8 +97,9 @@ def main():
         run([py, tools / "ppu_lifter.py", out / "libsre.linked.bin", "--raw",
              "--base", hex(BASE), "--toc", m.group(1), "--symbol-prefix", "libsre_",
              "--functions", tmp / f"{stem}_functions.json", "--hle-stubs", tmp / "hle_stubs.json",
+             "--code-end", hex(code_end(data)),
              "--header-name", "libsre_recomp.h", "--source-name", "libsre_recomp.cpp",
-             "--chunks", "4", "--output", out])
+             "--output", out])
 
     run([py, tools / "prx_exports.py", args.prx, "--symbol", "libsre",
          "--out", out / "libsre_exports.c"])
