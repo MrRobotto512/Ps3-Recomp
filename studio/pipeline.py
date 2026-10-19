@@ -245,12 +245,15 @@ def recompile_steps(project: Project, s: Settings) -> list[Step]:
 
 def build_steps(project: Project, s: Settings) -> list[Step]:
     cmake = find_cmake(s.cmake) or s.cmake
+    # libsre carries the SPURS kernel's own SPU programs, which must be lifted
+    # too: without them the real SPURS starts SPU threads that have no code.
+    spu_inputs = [str(elf_for(project, s))] + ([project.libsre] if project.libsre else [])
     configure = [cmake, "-S", str(ROOT), "-B", str(s.build_dir),
                  *GENERATORS[s.generator][1],
                  f"-DPS3RECOMP_DIR={s.toolkit_dir}",
                  f"-DRECOMP_DIR={s.recompiled_dir}",
                  f"-DPORT_NAME={project.port_name}",
-                 f"-DPORT_SPU_INPUTS={elf_for(project, s) if project.lift_spu else ''}",
+                 f"-DPORT_SPU_INPUTS={';'.join(spu_inputs) if project.lift_spu else ''}",
                  f"-DPORT_PRX_DIR={s.prx_dir if project.libsre else ''}",
                  f"-DPORT_INSTRUMENTED_RUNNER={'ON' if s.instrumented_runner else 'OFF'}"]
     if not s.multi_config:

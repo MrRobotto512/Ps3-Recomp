@@ -141,7 +141,9 @@ def test_libsre_step_and_configure(tmp_path):
     step = p.recompile_steps(project, s)[-1]
     assert step.key == "libsre" and step.argv[2] == project.libsre
     assert step.argv[step.argv.index("--output") + 1] == str(s.prx_dir)
-    assert f"-DPORT_PRX_DIR={s.prx_dir}" in p.build_steps(project, s)[0].argv
+    configure = p.build_steps(project, s)[0].argv
+    assert f"-DPORT_PRX_DIR={s.prx_dir}" in configure
+    assert f"-DPORT_SPU_INPUTS={eboot};{project.libsre}" in configure
 
 
 def test_find_cmake_inside_visual_studio(tmp_path, monkeypatch):
