@@ -55,7 +55,9 @@ The first run creates a `.venv` and installs the dependencies.
 1. **RPCS3 page:** set `rpcs3.exe`, decrypt your `EBOOT.BIN` there, then click
    *Use decrypted EBOOT.elf…*.
 2. **Game page:** the title and ID are read from `PARAM.SFO`. Check the game
-   folder (the one containing `PS3_GAME/`) and the port name.
+   folder (the one containing `PS3_GAME/`) and the port name. *Lift the SPU
+   programs* (on by default) lifts the SPU code embedded in the EBOOT during
+   Configure; games that use SPURS hang without it.
 3. **Recompile page:** *Recompile & build*, then *Launch*. All tool output
    streams into the log.
 4. **Settings:** compiler (clang-cl or MSVC), Release/RelWithDebInfo/Debug,

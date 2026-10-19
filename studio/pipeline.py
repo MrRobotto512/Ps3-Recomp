@@ -139,6 +139,10 @@ class Project:
     eboot: str = ""          # EBOOT.BIN or a decrypted EBOOT.elf
     game_root: str = ""      # folder holding PS3_GAME/ (the guest's disc root)
     port_name: str = "PS3Port"
+    # Lift the SPU programs embedded in the executable at configure time, so
+    # SPURS workloads, tasks and jobs have native code to run. Without them a
+    # SPURS game boots and then waits forever on work no SPU ever does.
+    lift_spu: bool = True
 
 
 @dataclass
@@ -228,7 +232,8 @@ def build_steps(project: Project, s: Settings) -> list[Step]:
                  *GENERATORS[s.generator][1],
                  f"-DPS3RECOMP_DIR={s.toolkit_dir}",
                  f"-DRECOMP_DIR={s.recompiled_dir}",
-                 f"-DPORT_NAME={project.port_name}"]
+                 f"-DPORT_NAME={project.port_name}",
+                 f"-DPORT_SPU_INPUTS={elf_for(project, s) if project.lift_spu else ''}"]
     if not s.multi_config:
         configure.append(f"-DCMAKE_BUILD_TYPE={s.build_type}")
     build = [cmake, "--build", str(s.build_dir), "--parallel", *([str(s.jobs)] if s.jobs > 0 else [])]
@@ -241,7 +246,9 @@ def build_steps(project: Project, s: Settings) -> list[Step]:
         if s.jobs > 0:
             build.append(f"/p:CL_MPCount={s.jobs}")
     return [
-        Step("configure", "Configure", "Generate the build with CMake.", configure),
+        Step("configure", "Configure",
+             "Generate the build with CMake" + (" and lift the SPU programs." if project.lift_spu else "."),
+             configure),
         Step("build", "Build", "Compile the lifted code and the ps3recomp runtime.", build),
     ]
 

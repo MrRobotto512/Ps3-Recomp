@@ -11,7 +11,7 @@ import time
 from PySide6.QtCore import QObject, QProcess, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QFileDialog, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
-from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, FluentIcon, IconWidget,
+from qfluentwidgets import (BodyLabel, CaptionLabel, CheckBox, ComboBox, FluentIcon, IconWidget,
                             IndeterminateProgressBar, InfoBadge, InfoBar, InfoBarIcon,
                             InfoBarPosition, LineEdit, PrimaryPushButton, PushButton,
                             StrongBodyLabel, Theme, ToolButton, setTheme)
@@ -155,6 +155,11 @@ class GamePage(Page):
         self.name.setPlaceholderText("PS3Port")
         self.name.editingFinished.connect(self._name_changed)
         info.body.addWidget(Field("Port name", self.name, "Name of the .exe that gets built"))
+        self.spu = CheckBox("Lift the SPU programs in the executable", info)
+        self.spu.stateChanged.connect(self._spu_changed)
+        info.body.addWidget(Field("SPU", self.spu,
+                                  "Needed by games that use SPURS. Done while configuring; "
+                                  "turn off if it fails and you only want to test the PPU side"))
 
         self.finish()
         self.refresh()
@@ -164,6 +169,9 @@ class GamePage(Page):
         self.eboot.setText(p.eboot)
         self.root.setText(p.game_root)
         self.name.setText(p.port_name)
+        self.spu.blockSignals(True)
+        self.spu.setChecked(p.lift_spu)
+        self.spu.blockSignals(False)
         self._show_format()
         self._show_meta()
 
@@ -226,6 +234,10 @@ class GamePage(Page):
 
     def _root_changed(self, path: str) -> None:
         self.state.project.game_root = path
+        self.state.touch()
+
+    def _spu_changed(self, _=None) -> None:
+        self.state.project.lift_spu = self.spu.isChecked()
         self.state.touch()
 
     def _name_changed(self) -> None:
